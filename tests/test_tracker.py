@@ -1,3 +1,6 @@
+import sqlite3
+from contextlib import closing
+
 import pytest
 
 from linkedin_mcp.errors import LinkedInError
@@ -74,3 +77,66 @@ def test_remove(store):
     assert store.remove("1") is True
     assert store.remove("1") is False
     assert store.list().total == 0
+
+
+# --------------------------------------------------------------- security regressions
+
+
+def test_tracker_db_is_private(store, tmp_path):
+    """The tracker holds salary talk, recruiter names and interview dates.
+
+    sqlite3.connect() creates the file at the umask default (0644), which left
+    the user's whole job hunt readable by every other local account.
+    """
+    store.save("111", title="Engineer", company="Acme")
+    assert (tmp_path / "tracker.db").stat().st_mode & 0o777 == 0o600
+
+
+def test_tracker_db_tightens_a_legacy_loose_file(tmp_path):
+    """A DB created by an older version must be tightened on next use."""
+    path = tmp_path / "tracker.db"
+    TrackerStore(path=path).save("1", title="t")
+    path.chmod(0o644)
+
+    TrackerStore(path=path).list()
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_tracker_refuses_a_symlinked_db_path(tmp_path):
+    """sqlite3.connect() follows symlinks, and pre-creating the file does not stop it.
+
+    A link planted at the DB path was an arbitrary-file-create/clobber primitive:
+    SQLite happily wrote its header through the link, at 0644.
+    """
+    victim = tmp_path / "victim.txt"
+    victim.write_text("do not clobber")
+    link = tmp_path / "tracker.db"
+    link.symlink_to(victim)
+
+    with pytest.raises(LinkedInError, match="symlink"):
+        TrackerStore(path=link).list()
+    assert victim.read_text() == "do not clobber"
+
+
+def test_tracker_refuses_a_dangling_symlinked_db_path(tmp_path):
+    """A link to a non-existent target let SQLite create that target at 0644."""
+    link = tmp_path / "tracker.db"
+    target = tmp_path / "not-there-yet"
+    link.symlink_to(target)
+
+    with pytest.raises(LinkedInError, match="symlink"):
+        TrackerStore(path=link).list()
+    assert not target.exists()
+
+
+def test_sqlite_sidecars_inherit_private_mode(tmp_path):
+    """WAL/SHM files are created by SQLite, not by us — confirm they inherit 0600."""
+    path = tmp_path / "tracker.db"
+    store = TrackerStore(path=path)
+    store.save("1", title="t")
+    with closing(sqlite3.connect(path)) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE IF NOT EXISTS x (a)")
+        conn.commit()
+        for sidecar in tmp_path.glob("tracker.db-*"):
+            assert sidecar.stat().st_mode & 0o777 == 0o600, sidecar

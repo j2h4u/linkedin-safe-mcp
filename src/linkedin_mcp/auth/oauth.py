@@ -13,7 +13,6 @@ from __future__ import annotations
 import html as html_mod
 import json
 import logging
-import os
 import secrets
 import threading
 import time
@@ -26,7 +25,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
-from ..config import Settings, data_dir, setup_instructions
+from ..config import Settings, data_dir, ensure_private, setup_instructions, write_private
 from ..errors import LinkedInError, NotAuthenticatedError
 
 AUTHORIZE_URL = "https://www.linkedin.com/oauth/v2/authorization"
@@ -45,6 +44,17 @@ _ERROR_HTML = """<!doctype html><meta charset="utf-8"><title>LinkedIn login fail
 <div style="text-align:center"><h1>&#10007; Login failed</h1><p>{msg}</p></div></body>"""
 
 
+def _error_page(msg: str) -> str:
+    """Render the failure page.
+
+    `msg` carries attacker-influenced text (LinkedIn's error_description is just
+    a query parameter on a loopback URL anyone can hit), and
+    _explain_authorize_error un-escapes it for readability — so it must be
+    HTML-escaped here, at the sink, or it is reflected XSS.
+    """
+    return _ERROR_HTML.format(msg=html_mod.escape(msg, quote=True))
+
+
 class TokenStore:
     """Persists the OAuth token set (plus a cached userinfo profile) as JSON, 0600."""
 
@@ -59,14 +69,15 @@ class TokenStore:
 
     def load(self) -> dict | None:
         try:
-            return json.loads(self.path.read_text())
+            data = json.loads(self.path.read_text())
         except (FileNotFoundError, json.JSONDecodeError):
             return None
+        ensure_private(self.path)  # tighten a token file written by an older version
+        return data
 
     def save(self, tokens: dict) -> None:
         with self._lock:
-            self.path.write_text(json.dumps(tokens, indent=2))
-            os.chmod(self.path, 0o600)
+            write_private(self.path, json.dumps(tokens, indent=2))
 
     def update(self, **fields) -> None:
         data = self.load() or {}
@@ -265,23 +276,33 @@ class OAuthFlow:
         return url
 
     def _handle_callback(self, params: dict) -> tuple[int, str]:
+        # The state check comes FIRST, before the error branch, and gates every
+        # path that can terminate the flow. This listener is reachable by any
+        # local process and by any web page the user has open (a bare <img
+        # src="http://127.0.0.1:8765/callback?error=x"> is enough), so handling
+        # `error` before validating `state` let an unauthenticated request kill
+        # a pending login — which also released the port for whoever wanted to
+        # catch the real authorization code next.
+        # Compared as bytes: secrets.compare_digest() raises TypeError on a
+        # non-ASCII str, and any drive-by request can supply one.
+        supplied = str(params.get("state") or "").encode("utf-8", "replace")
+        if not secrets.compare_digest(supplied, self._state.encode()):
+            return 400, _error_page("State mismatch — possible CSRF; try again.")
         if params.get("error"):
             self._error = _explain_authorize_error(
                 params.get("error_description") or params["error"]
             )
             self._done.set()
-            return 200, _ERROR_HTML.format(msg=self._error)
-        if params.get("state") != self._state:
-            return 400, _ERROR_HTML.format(msg="State mismatch — possible CSRF; try again.")
+            return 200, _error_page(self._error)
         code = params.get("code")
         if not code:
-            return 400, _ERROR_HTML.format(msg="Missing authorization code.")
+            return 400, _error_page("Missing authorization code.")
         try:
             tokens = exchange_code(self.settings, code)
         except Exception as exc:
             self._error = str(exc)
             self._done.set()
-            return 200, _ERROR_HTML.format(msg=self._error)
+            return 200, _error_page(self._error)
         self.store.save(tokens)
         self._done.set()
         return 200, _SUCCESS_HTML

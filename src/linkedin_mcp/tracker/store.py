@@ -8,12 +8,13 @@ cover letters later even if the posting is taken down.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ..config import data_dir
+from ..config import data_dir, ensure_private, open_private
 from ..errors import LinkedInError
 from ..models import JobEvent, SavedJob, SavedJobsList, SavedJobSummary
 
@@ -61,7 +62,25 @@ class TrackerStore:
         return self._path or (data_dir() / "tracker.db")
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        path = self.path
+        # sqlite3.connect() follows symlinks and creates missing files at the umask
+        # default (0644). Both matter: the DB holds salary and interview notes, and a
+        # symlink planted here would redirect the write to whatever it points at.
+        if path.is_symlink():
+            raise LinkedInError(
+                f"Refusing to open the tracker database: {path} is a symlink. "
+                "Remove it, or point LINKEDIN_MCP_DIR at a directory you control."
+            )
+        if not path.exists():
+            try:
+                os.close(open_private(path, exclusive=True))
+            except FileExistsError as exc:  # appeared between the checks — a race
+                raise LinkedInError(
+                    f"Refusing to open the tracker database: {path} was created "
+                    "underneath us. Remove it and retry."
+                ) from exc
+        ensure_private(path)
+        conn = sqlite3.connect(path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.executescript(_SCHEMA)

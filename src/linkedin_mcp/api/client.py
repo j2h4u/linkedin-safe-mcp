@@ -15,15 +15,18 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import stat
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
 from ..auth.oauth import TokenStore, maybe_refresh
-from ..config import Settings, data_dir
-from ..errors import LinkedInAPIError, NotAuthenticatedError
+from ..config import Settings, data_dir, ensure_private, image_root, write_private
+from ..errors import LinkedInAPIError, LinkedInError, NotAuthenticatedError
 from .ltf import escape_little_text
 from .urns import encode_urn, extract_post_urn, post_url
 
@@ -31,6 +34,35 @@ logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.linkedin.com"
 _FALLBACK_STATUSES = {403, 426}
+
+# --------------------------------------------------------------- upload guards
+
+# `image_path` is an agent-supplied tool argument, and this same server feeds
+# untrusted scraped job text into that agent's context. Without these checks the
+# image attachment is an arbitrary-file-read-to-public-post exfiltration channel:
+# "attach ~/.ssh/id_rsa" is a valid call. An extension allowlist alone is
+# bypassed by renaming, and a magic-byte prefix alone is bypassed by appending the
+# secret after a real header — so the content must match at BOTH ends.
+_IMAGE_MAGIC: dict[str, tuple[bytes, ...]] = {
+    ".png": (b"\x89PNG\r\n\x1a\n",),
+    ".jpg": (b"\xff\xd8\xff",),
+    ".jpeg": (b"\xff\xd8\xff",),
+    ".gif": (b"GIF87a", b"GIF89a"),
+}
+# Each format's mandatory final bytes: PNG's IEND chunk, JPEG's EOI marker, GIF's
+# trailer. Requiring the file to END here is what stops `header || secret`.
+_IMAGE_TRAILER: dict[str, bytes] = {
+    ".png": b"IEND\xaeB`\x82",
+    ".jpg": b"\xff\xd9",
+    ".jpeg": b"\xff\xd9",
+    ".gif": b";",
+}
+_IMAGE_MAX_BYTES = 10 * 1024 * 1024  # LinkedIn rejects larger member uploads anyway
+
+# Hosts allowed to receive the Bearer token during a media upload. The upload URL
+# arrives inside a LinkedIn API response, so it is only as trustworthy as that
+# response — pin it rather than PUT credentials wherever we are told to.
+_UPLOAD_HOSTS = ("linkedin.com", "licdn.com")
 
 
 # --------------------------------------------------------------- payload builders
@@ -197,15 +229,17 @@ class LinkedInClient:
 
     def _load_state(self) -> dict:
         try:
-            return json.loads(self._state_path.read_text())
+            data = json.loads(self._state_path.read_text())
         except (FileNotFoundError, json.JSONDecodeError):
             return {}
+        ensure_private(self._state_path)  # tighten a file written by an older version
+        return data
 
     def _remember_backend(self, backend: str) -> None:
         state = self._load_state()
         if state.get("posts_backend") != backend:
             state["posts_backend"] = backend
-            self._state_path.write_text(json.dumps(state, indent=2))
+            write_private(self._state_path, json.dumps(state, indent=2))
 
     def _backend_order(self, prefer_ugc: bool) -> list[str]:
         chosen = self.settings.posts_backend
@@ -294,21 +328,118 @@ class LinkedInClient:
     # -------------------------------------------------------------- image upload
 
     def _read_image(self, image_path: str) -> bytes:
-        path = Path(image_path).expanduser()
-        if not path.is_file():
-            raise ValueError(f"Image file not found: {path}")
-        return path.read_bytes()
+        """Read a local image for upload, refusing anything that isn't really an image.
+
+        Deliberately strict — see the _IMAGE_MAGIC comment above for why this is a
+        security boundary and not mere input tidiness.
+        """
+        try:
+            # resolve() collapses symlinks and traversal so the confinement
+            # check below cannot be walked around with a link or '..'.
+            path = Path(image_path).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"Image file not found: {image_path}") from exc
+
+        suffix = path.suffix.lower()
+        if suffix not in _IMAGE_MAGIC:
+            raise ValueError(
+                f"Refusing to attach {path.name!r}: only "
+                f"{', '.join(sorted(_IMAGE_MAGIC))} files can be posted."
+            )
+
+        root = image_root()
+        if root is not None and not path.is_relative_to(root):
+            raise ValueError(
+                f"Refusing to attach {path}: LINKEDIN_MCP_IMAGE_DIR confines uploads to {root}."
+            )
+
+        # O_NONBLOCK matters: without it, os.open() on a FIFO with no writer blocks
+        # forever and wedges this thread — an agent-reachable hang. It is a no-op for
+        # regular files, which are all we go on to accept. O_NOFOLLOW is
+        # belt-and-braces against a symlink swapped in after resolve() (TOCTOU).
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(path, flags)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError(
+                    f"Refusing to attach {path}: not a regular file "
+                    "(a directory, device or pipe cannot be a post image)."
+                )
+            if info.st_nlink > 1:
+                # A hardlink cannot be resolved away, so it is the one way to
+                # smuggle an outside file into LINKEDIN_MCP_IMAGE_DIR.
+                raise ValueError(
+                    f"Refusing to attach {path.name!r}: it is a hardlink "
+                    f"({info.st_nlink} names point at these bytes). Copy it first."
+                )
+            chunks: list[bytes] = []
+            remaining = _IMAGE_MAX_BYTES + 1  # one extra byte reveals an oversized file
+            while remaining > 0:
+                chunk = os.read(fd, min(remaining, 1 << 20))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        finally:
+            os.close(fd)
+
+        data = b"".join(chunks)
+        if len(data) > _IMAGE_MAX_BYTES:
+            raise ValueError(
+                f"Refusing to attach {path.name!r}: larger than "
+                f"{_IMAGE_MAX_BYTES // (1024 * 1024)} MB."
+            )
+        kind = suffix.lstrip(".")
+        if not data.startswith(_IMAGE_MAGIC[suffix]):
+            raise ValueError(
+                f"Refusing to attach {path.name!r}: the contents are not a real "
+                f"{kind} image, whatever the file name says."
+            )
+        if not data.endswith(_IMAGE_TRAILER[suffix]):
+            raise ValueError(
+                f"Refusing to attach {path.name!r}: it starts like a {kind} image but "
+                f"does not end like one — truncated, or something is appended after "
+                f"the image data."
+            )
+        return data
+
+    @staticmethod
+    def _checked_upload_url(upload_url: str) -> str:
+        try:
+            parsed = urlparse(upload_url)
+            host = (parsed.hostname or "").lower()
+            # No userinfo: "https://www.linkedin.com@evil.test/" reads as LinkedIn to a
+            # human and resolves to evil.test. LinkedIn never returns credentials in an
+            # upload URL, so refusing the whole class costs nothing. A trailing-dot
+            # host is likewise never legitimate here, so it is not normalised away.
+            ok = (
+                parsed.scheme == "https"
+                and parsed.username is None
+                and parsed.password is None
+                and any(host == h or host.endswith("." + h) for h in _UPLOAD_HOSTS)
+            )
+        except ValueError:  # malformed enough that urlparse itself gives up
+            ok = False
+        if not ok:
+            raise LinkedInError(
+                f"Refusing to upload to {upload_url[:80]!r}: LinkedIn returned an "
+                "upload target that is not an HTTPS LinkedIn host. Nothing was sent."
+            )
+        return upload_url
 
     def _upload_binary(self, upload_url: str, data: bytes) -> None:
         resp = self._http.put(
-            upload_url,
+            self._checked_upload_url(upload_url),
             content=data,
             headers={
                 "Authorization": f"Bearer {self._token()}",
                 "Content-Type": "application/octet-stream",
             },
         )
-        if resp.status_code >= 400:
+        # >=300, not >=400: redirects are not followed (that would carry the Bearer
+        # token off-host), so a 3xx means the bytes never landed.
+        if resp.status_code >= 300:
             raise LinkedInAPIError(resp.status_code, f"Image upload failed: {resp.text[:200]}")
 
     def _upload_image_rest(self, author: str, image_path: str) -> str:

@@ -8,3 +8,12 @@ build/
 .ruff_cache/
 .coverage
 .env
+.DS_Store
+
+# Runtime secrets and private data. These normally live in ~/.linkedin-mcp, but
+# LINKEDIN_MCP_DIR can point anywhere — including into this checkout — so never
+# let a stray `git add -A` stage a live OAuth token or the job-hunt database.
+.linkedin-mcp/
+tokens.json
+state.json
+*.db
