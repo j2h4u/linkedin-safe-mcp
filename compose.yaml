@@ -9,25 +9,24 @@ services:
     user: "10001:10001"
     read_only: true
     mem_limit: 512m
-    env_file:
-      - "${HOME}/.secrets/linkedin.env"
     environment:
+      LINKEDIN_CLIENT_ID: "${LINKEDIN_CLIENT_ID:-}"
+      LINKEDIN_CLIENT_SECRET: "${LINKEDIN_CLIENT_SECRET:-}"
       LINKEDIN_MCP_HOST: 0.0.0.0
       LINKEDIN_MCP_PORT: "8000"
-      LINKEDIN_MCP_ALLOWED_HOSTS: linkedin-safe-mcp,linkedin-safe-mcp:8000
+      LINKEDIN_MCP_ALLOWED_HOSTS: "${LINKEDIN_MCP_ALLOWED_HOSTS:-127.0.0.1:*,localhost:*}"
+      LINKEDIN_MCP_ALLOWED_ORIGINS: "${LINKEDIN_MCP_ALLOWED_ORIGINS:-http://127.0.0.1:*,http://localhost:*}"
       LINKEDIN_MCP_DIR: /data
       LINKEDIN_OPEN_BROWSER: "false"
-      # Docker publishes this listener only on the host loopback interface.
       LINKEDIN_REDIRECT_BIND_HOST: 0.0.0.0
       LINKEDIN_REDIRECT_PORT: "8765"
     ports:
-      - "127.0.0.1:8765:8765"
+      - "127.0.0.1:${LINKEDIN_MCP_HOST_PORT:-8000}:8000"
+      - "127.0.0.1:${LINKEDIN_REDIRECT_HOST_PORT:-8765}:8765"
     volumes:
       - linkedin-safe-mcp-data:/data
     tmpfs:
       - "/tmp:rw,noexec,nosuid,size=64m"
-    networks:
-      - mcp-private-noauth
     healthcheck:
       test:
         - CMD
@@ -47,8 +46,3 @@ services:
 
 volumes:
   linkedin-safe-mcp-data:
-
-networks:
-  mcp-private-noauth:
-    external: true
-    name: mcp-private-noauth

@@ -122,7 +122,12 @@ docker-up:
 runtime-smoke:
     #!/usr/bin/env bash
     set -euo pipefail
-    project="linkedin-safe-mcp-smoke"
+    project="linkedin-safe-mcp-smoke-$$"
+    free_port() {
+        uv run python -c 'import socket; sock = socket.socket(); sock.bind(("127.0.0.1", 0)); print(sock.getsockname()[1]); sock.close()'
+    }
+    mcp_host_port="$(free_port)"
+    redirect_host_port="$(free_port)"
     cleanup() {
         status="$1"
         if [ "$status" -ne 0 ]; then
@@ -132,10 +137,13 @@ runtime-smoke:
         docker compose -p "$project" down -v --remove-orphans || true
     }
     trap 'cleanup "$?"' EXIT
-    docker compose -p "$project" up -d --build --force-recreate --remove-orphans --wait --wait-timeout 90
-    docker compose -p "$project" exec -T \
-        -e LINKEDIN_MCP_SMOKE_URL=http://linkedin-safe-mcp:8000/mcp \
-        linkedin-safe-mcp python - < scripts/check_streamable_http.py
+    LINKEDIN_MCP_HOST_PORT="$mcp_host_port" \
+    LINKEDIN_REDIRECT_HOST_PORT="$redirect_host_port" \
+    LINKEDIN_MCP_ALLOWED_HOSTS="127.0.0.1:*,localhost:*" \
+    LINKEDIN_MCP_ALLOWED_ORIGINS="http://127.0.0.1:*,http://localhost:*" \
+        docker compose -p "$project" up -d --build --force-recreate --remove-orphans --wait --wait-timeout 90
+    LINKEDIN_MCP_SMOKE_URL="http://127.0.0.1:${mcp_host_port}/mcp" \
+        uv run python scripts/check_streamable_http.py
 
 # Full local gate for agents before claiming completion.
 verify: check crap-check unit deps-audit docker-build runtime-smoke
