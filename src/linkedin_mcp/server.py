@@ -10,14 +10,13 @@ Design notes:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Literal, cast
+from typing import cast
 
 from mcp.server.mcpserver import MCPServer
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from .api.client import LinkedInClient
-from .api.urns import extract_job_id
 from .auth.oauth import OAuthFlow, TokenStore
 from .config import Settings, setup_instructions
 from .errors import LinkedInError
@@ -32,14 +31,8 @@ from .models import (
     LoginStarted,
     PostResult,
     Profile,
-    SavedJob,
-    SavedJobDraft,
-    SavedJobsList,
     SearchJobsInput,
 )
-from .tracker.store import TrackerStore
-
-TrackStatus = Literal["interested", "applied", "interviewing", "offer", "rejected", "withdrawn", "archived"]
 
 
 def _optional_string(value: object) -> str | None:
@@ -57,42 +50,17 @@ def _mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _load_job_detail(job_id: str) -> JobDetail | None:
-    try:
-        return _jobs().job(job_id)
-    except LinkedInError:
-        return None
-
-
-def _job_draft(job_id: str, status: TrackStatus, note: str | None, detail: JobDetail | None) -> SavedJobDraft:
-    if detail is None:
-        return SavedJobDraft(job_id=job_id, status=status, note=note)
-    return SavedJobDraft(
-        job_id=job_id,
-        title=detail.title,
-        company=detail.company,
-        location=detail.location,
-        url=detail.url,
-        salary=detail.salary,
-        description=detail.description,
-        status=status,
-        note=note,
-    )
-
-
 mcp = MCPServer(
     name="linkedin",
     instructions=(
-        "LinkedIn tools for agents, in three groups:\n"
+        "LinkedIn tools for agents, in two groups:\n"
         "1) Posting/engagement (create_post, comment_on_post, like_post, …) uses the "
         "official LinkedIn API on the user's behalf — requires one-time OAuth: check "
         "auth_status; if not authenticated, call login and have the user open the URL. "
         "LinkedIn caps member posting at 150 requests/day and rejects duplicate posts.\n"
         "2) Job search (search_jobs, get_job) uses LinkedIn's public guest endpoints — "
         "no login needed, the user's account is never at risk. On rate-limit errors, "
-        "wait a minute before retrying and keep limits small.\n"
-        "3) The tracker (save_job, list_saved_jobs, update_job_status, …) is a local "
-        "job-pipeline database on the user's machine; use it to run their job hunt."
+        "wait a minute before retrying and keep limits small."
     ),
 )
 
@@ -123,12 +91,6 @@ def _jobs() -> GuestJobsClient:
     return cast(GuestJobsClient, _singletons["jobs"])
 
 
-def _tracker() -> TrackerStore:
-    if "tracker" not in _singletons:
-        _singletons["tracker"] = TrackerStore()
-    return cast(TrackerStore, _singletons["tracker"])
-
-
 def build_auth_status() -> AuthStatus:
     settings = Settings.from_env()
     store = _store()
@@ -144,8 +106,7 @@ def build_auth_status() -> AuthStatus:
             "re-login won't be possible when the token expires."
             if token_valid
             else (
-                "LinkedIn app credentials are missing, so posting tools are "
-                "unavailable. Job search and the tracker work without them."
+                "LinkedIn app credentials are missing, so posting tools are unavailable. Job search works without them."
             )
         )
         return AuthStatus(
@@ -322,55 +283,3 @@ def get_job(job: str) -> JobDetail:
     posting is not Easy Apply. `job` is a job_id from search_jobs, a
     linkedin.com/jobs/view/... URL, or a jobPosting URN."""
     return _jobs().job(job)
-
-
-# ---------------------------------------------------------------------- tracker
-
-
-@mcp.tool()
-def save_job(job: str, status: TrackStatus = "interested", note: str | None = None) -> SavedJob:
-    """Save a job to the user's local application tracker (stores a snapshot of the
-    posting, including its description, so it survives delisting). Idempotent: if
-    already saved, appends the note instead. `job` is a job_id, URL, or URN."""
-    job_id = extract_job_id(job)
-    detail = _load_job_detail(job_id)
-    draft = _job_draft(job_id, status, note, detail)
-    saved, _created = _tracker().save(draft)
-    return saved
-
-
-@mcp.tool()
-def get_saved_job(job_id: str) -> SavedJob:
-    """Get one tracked job with its snapshot (description included) and full event
-    history (status changes and notes)."""
-    return _tracker().get(extract_job_id(job_id))
-
-
-@mcp.tool()
-def list_saved_jobs(status: TrackStatus | None = None, search: str | None = None) -> SavedJobsList:
-    """List the user's tracked jobs with pipeline counts by status. Optionally
-    filter by status and/or a title/company substring."""
-    return _tracker().list(status=status, search=search)
-
-
-@mcp.tool()
-def update_job_status(job_id: str, status: TrackStatus, note: str | None = None) -> SavedJob:
-    """Move a tracked job through the pipeline (interested → applied → interviewing
-    → offer/rejected/withdrawn; archived hides it). The change is recorded in the
-    job's event history with the optional note."""
-    return _tracker().update_status(extract_job_id(job_id), status, note)
-
-
-@mcp.tool()
-def add_job_note(job_id: str, note: str) -> SavedJob:
-    """Append a timestamped note to a tracked job (e.g. recruiter name, interview
-    date, salary discussed) without changing its status."""
-    return _tracker().add_note(extract_job_id(job_id), note)
-
-
-@mcp.tool()
-def remove_saved_job(job_id: str) -> str:
-    """Remove a job (and its history) from the local tracker. Prefer
-    update_job_status(..., "archived") to keep the record."""
-    removed = _tracker().remove(extract_job_id(job_id))
-    return "Removed." if removed else "That job was not in the tracker."

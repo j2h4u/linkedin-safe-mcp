@@ -24,8 +24,7 @@ from .config import DEFAULT_MCP_PORT
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         prog="linkedin-safe-mcp",
-        description="MCP server for LinkedIn: official-API posting, account-safe job "
-        "search, and a local application tracker.",
+        description="MCP server for LinkedIn: official-API posting and account-safe job search.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command")

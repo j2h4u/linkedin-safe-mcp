@@ -20,12 +20,7 @@ _PRIVATE_DIR = 0o700
 
 
 def data_dir() -> Path:
-    """Directory for tokens, the tracker DB, and remembered state.
-
-    Forced to 0700: everything in here (OAuth access token, the job-hunt
-    database with salary/interview notes) is private to the user, and the
-    default 0755 made those readable by every other local account.
-    """
+    """Directory for OAuth tokens and remembered state, private to the user."""
     override = os.environ.get("LINKEDIN_MCP_DIR")
     path = Path(override).expanduser() if override else Path.home() / ".linkedin-mcp"
     # mkdir(parents=True, mode=...) applies the mode to the leaf only — any
