@@ -8,23 +8,26 @@ redirect port) that persisted until the server process restarted.
 """
 
 import socket
+from collections.abc import Generator
+from pathlib import Path
+from typing import cast
 
 import pytest
-from test_oauth import make_settings
 
 import linkedin_mcp.auth.oauth as oauth_module
 from linkedin_mcp import server
 from linkedin_mcp.auth.oauth import OAuthFlow, TokenStore
 from linkedin_mcp.errors import LinkedInError
+from test_oauth import make_settings
 
 
 @pytest.fixture(autouse=True)
-def no_browser(monkeypatch):
-    monkeypatch.setattr(oauth_module.webbrowser, "open", lambda *a, **k: True)
+def no_browser(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(oauth_module.webbrowser, "open", lambda *_args, **_kwargs: True)
 
 
 @pytest.fixture(autouse=True)
-def clean_flow_singleton():
+def clean_flow_singleton() -> Generator[None]:
     server._singletons.pop("flow", None)
     yield
     flow = server._singletons.pop("flow", None)
@@ -35,13 +38,13 @@ def clean_flow_singleton():
 
 
 @pytest.fixture
-def creds(monkeypatch):
+def creds(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LINKEDIN_CLIENT_ID", "cid")
     monkeypatch.setenv("LINKEDIN_CLIENT_SECRET", "secret")
 
 
 @pytest.fixture
-def blocked_port():
+def blocked_port() -> Generator[int]:
     blocker = socket.socket()
     blocker.bind(("127.0.0.1", 0))
     blocker.listen(1)
@@ -51,21 +54,20 @@ def blocked_port():
         blocker.close()
 
 
-def test_bind_failure_marks_flow_terminal(tmp_path, blocked_port):
-    flow = OAuthFlow(
-        make_settings(redirect_port=blocked_port), TokenStore(path=tmp_path / "t.json")
-    )
+def test_bind_failure_marks_flow_terminal(tmp_path: Path, blocked_port: int):
+    flow = OAuthFlow(make_settings(redirect_port=blocked_port), TokenStore(path=tmp_path / "t.json"))
     with pytest.raises(LinkedInError, match="Could not listen"):
         flow.start(open_browser=False)
     assert flow._done.is_set(), "a flow that never started must not look in-progress"
     assert flow._error
 
 
-def test_login_tool_not_poisoned_by_bind_failure(creds, monkeypatch):
+def test_login_tool_not_poisoned_by_bind_failure(creds: None, monkeypatch: pytest.MonkeyPatch):
+    assert creds is None
     blocker = socket.socket()
     blocker.bind(("127.0.0.1", 0))
     blocker.listen(1)
-    port = blocker.getsockname()[1]
+    port = cast(int, blocker.getsockname()[1])
     monkeypatch.setenv("LINKEDIN_REDIRECT_PORT", str(port))
 
     try:
@@ -83,14 +85,16 @@ def test_login_tool_not_poisoned_by_bind_failure(creds, monkeypatch):
     started = server.login()
     assert started.authorization_url.startswith("https://www.linkedin.com/oauth")
     live = server._singletons["flow"]
+    assert isinstance(live, OAuthFlow)
     assert live._server is not None
     assert not live._done.is_set()
 
 
-def test_login_reuses_genuinely_pending_flow(creds, monkeypatch):
+def test_login_reuses_genuinely_pending_flow(creds: None, monkeypatch: pytest.MonkeyPatch):
+    assert creds is None
     probe = socket.socket()
     probe.bind(("127.0.0.1", 0))
-    port = probe.getsockname()[1]
+    port = cast(int, probe.getsockname()[1])
     probe.close()
     monkeypatch.setenv("LINKEDIN_REDIRECT_PORT", str(port))
 

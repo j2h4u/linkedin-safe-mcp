@@ -3,6 +3,8 @@ schema, so field names and descriptions are part of the agent-facing contract)."
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------- auth / profile
@@ -43,6 +45,15 @@ class PostResult(BaseModel):
     visibility: str
 
 
+class CreatePostInput(BaseModel):
+    text: str
+    visibility: Literal["PUBLIC", "CONNECTIONS"] = "PUBLIC"
+    link: str | None = None
+    link_title: str | None = None
+    link_description: str | None = None
+    image_path: str | None = None
+
+
 class CommentResult(BaseModel):
     comment_urn: str | None = None
     target_urn: str
@@ -70,6 +81,22 @@ class JobSearchResults(BaseModel):
     note: str | None = None
 
 
+class SearchJobsInput(BaseModel):
+    keywords: str
+    location: str | None = None
+    workplace: Literal["onsite", "remote", "hybrid"] | None = None
+    time_posted: Literal["any", "past_24h", "past_week", "past_month"] = "any"
+    experience_levels: (
+        list[Literal["internship", "entry", "associate", "mid_senior", "director", "executive"]] | None
+    ) = None
+    job_types: (
+        list[Literal["full_time", "part_time", "contract", "temporary", "internship", "volunteer", "other"]] | None
+    ) = None
+    easy_apply: bool = False
+    sort: Literal["relevance", "recent"] = "relevance"
+    limit: int = 25
+
+
 class JobDetail(BaseModel):
     job_id: str
     title: str | None = None
@@ -84,9 +111,7 @@ class JobDetail(BaseModel):
     employment_type: str | None = None
     job_functions: str | None = None
     industries: str | None = None
-    apply_url: str | None = Field(
-        default=None, description="External ATS apply URL when the posting is not Easy Apply"
-    )
+    apply_url: str | None = Field(default=None, description="External ATS apply URL when the posting is not Easy Apply")
     description: str | None = None
 
 
@@ -110,7 +135,21 @@ class SavedJob(BaseModel):
     saved_at: str
     updated_at: str
     description: str | None = None
-    events: list[JobEvent] = []
+    events: list[JobEvent] = Field(default_factory=list)
+
+
+class SavedJobDraft(BaseModel):
+    """Typed snapshot passed to the tracker when a job is first saved."""
+
+    job_id: str
+    title: str | None = None
+    company: str | None = None
+    location: str | None = None
+    url: str | None = None
+    salary: str | None = None
+    description: str | None = None
+    status: str = "interested"
+    note: str | None = None
 
 
 class SavedJobSummary(BaseModel):

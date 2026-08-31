@@ -4,9 +4,7 @@ from linkedin_mcp.api.urns import extract_job_id, extract_post_urn, post_url
 
 
 def test_post_urn_passthrough():
-    assert (
-        extract_post_urn("urn:li:share:6844785523593134080") == "urn:li:share:6844785523593134080"
-    )
+    assert extract_post_urn("urn:li:share:6844785523593134080") == "urn:li:share:6844785523593134080"
     assert extract_post_urn("urn:li:ugcPost:123456") == "urn:li:ugcPost:123456"
 
 
@@ -30,15 +28,10 @@ def test_job_id_variants():
     assert extract_job_id("urn:li:jobPosting:4449049579") == "4449049579"
     assert extract_job_id("https://www.linkedin.com/jobs/view/4449049579") == "4449049579"
     assert (
-        extract_job_id(
-            "https://www.linkedin.com/jobs/view/software-engineer-at-twin-prime-4449049579?position=1"
-        )
+        extract_job_id("https://www.linkedin.com/jobs/view/software-engineer-at-twin-prime-4449049579?position=1")
         == "4449049579"
     )
-    assert (
-        extract_job_id("https://www.linkedin.com/jobs/search/?currentJobId=4449049579&keywords=x")
-        == "4449049579"
-    )
+    assert extract_job_id("https://www.linkedin.com/jobs/search/?currentJobId=4449049579&keywords=x") == "4449049579"
 
 
 def test_job_id_not_confused_by_digits_in_slug():

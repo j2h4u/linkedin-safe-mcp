@@ -1,23 +1,28 @@
+from typing import Literal, cast
+
 import pytest
 
 from linkedin_mcp.jobs.filters import build_search_params
+from linkedin_mcp.models import SearchJobsInput
 
 
 def test_minimal_params():
-    params = build_search_params("python developer")
+    params = build_search_params(SearchJobsInput(keywords="python developer"))
     assert params == {"keywords": "python developer", "sortBy": "R"}
 
 
 def test_full_params():
     params = build_search_params(
-        "ml engineer",
-        location="India",
-        workplace="remote",
-        time_posted="past_week",
-        experience_levels=["entry", "associate"],
-        job_types=["full_time", "contract"],
-        easy_apply=True,
-        sort="recent",
+        SearchJobsInput(
+            keywords="ml engineer",
+            location="India",
+            workplace="remote",
+            time_posted="past_week",
+            experience_levels=["entry", "associate"],
+            job_types=["full_time", "contract"],
+            easy_apply=True,
+            sort="recent",
+        ),
     )
     assert params == {
         "keywords": "ml engineer",
@@ -32,9 +37,14 @@ def test_full_params():
 
 
 def test_time_posted_any_omitted():
-    assert "f_TPR" not in build_search_params("x", time_posted="any")
+    assert "f_TPR" not in build_search_params(SearchJobsInput(keywords="x", time_posted="any"))
 
 
 def test_unknown_value_raises_with_allowed_list():
     with pytest.raises(ValueError, match="past_24h"):
-        build_search_params("x", time_posted="yesterday")
+        build_search_params(
+            SearchJobsInput(
+                keywords="x",
+                time_posted=cast(Literal["any", "past_24h", "past_week", "past_month"], "yesterday"),
+            )
+        )

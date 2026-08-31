@@ -9,10 +9,12 @@ Design notes:
 
 from __future__ import annotations
 
-from contextlib import suppress
-from typing import Literal
+from collections.abc import Mapping
+from typing import Literal, cast
 
 from mcp.server.mcpserver import MCPServer
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from .api.client import LinkedInClient
 from .api.urns import extract_job_id
@@ -24,27 +26,59 @@ from .jobs.guest_client import GuestJobsClient
 from .models import (
     AuthStatus,
     CommentResult,
+    CreatePostInput,
     JobDetail,
     JobSearchResults,
     LoginStarted,
     PostResult,
     Profile,
     SavedJob,
+    SavedJobDraft,
     SavedJobsList,
+    SearchJobsInput,
 )
 from .tracker.store import TrackerStore
 
-Visibility = Literal["PUBLIC", "CONNECTIONS"]
-Workplace = Literal["onsite", "remote", "hybrid"]
-TimePosted = Literal["any", "past_24h", "past_week", "past_month"]
-Experience = Literal["internship", "entry", "associate", "mid_senior", "director", "executive"]
-JobType = Literal[
-    "full_time", "part_time", "contract", "temporary", "internship", "volunteer", "other"
-]
-Sort = Literal["relevance", "recent"]
-TrackStatus = Literal[
-    "interested", "applied", "interviewing", "offer", "rejected", "withdrawn", "archived"
-]
+TrackStatus = Literal["interested", "applied", "interviewing", "offer", "rejected", "withdrawn", "archived"]
+
+
+def _optional_string(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _required_string(value: object, what: str) -> str:
+    result = _optional_string(value)
+    if result is None:
+        raise LinkedInError(f"LinkedIn returned an invalid {what}.")
+    return result
+
+
+def _mapping(value: object) -> Mapping[str, object]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _load_job_detail(job_id: str) -> JobDetail | None:
+    try:
+        return _jobs().job(job_id)
+    except LinkedInError:
+        return None
+
+
+def _job_draft(job_id: str, status: TrackStatus, note: str | None, detail: JobDetail | None) -> SavedJobDraft:
+    if detail is None:
+        return SavedJobDraft(job_id=job_id, status=status, note=note)
+    return SavedJobDraft(
+        job_id=job_id,
+        title=detail.title,
+        company=detail.company,
+        location=detail.location,
+        url=detail.url,
+        salary=detail.salary,
+        description=detail.description,
+        status=status,
+        note=note,
+    )
+
 
 mcp = MCPServer(
     name="linkedin",
@@ -65,35 +99,41 @@ mcp = MCPServer(
 _singletons: dict[str, object] = {}
 
 
+@mcp.custom_route("/health", methods=["GET"])
+async def health(_request: Request) -> JSONResponse:
+    """Container health endpoint; it deliberately exposes no credentials or user data."""
+    return JSONResponse({"status": "ok"})
+
+
 def _store() -> TokenStore:
     if "store" not in _singletons:
         _singletons["store"] = TokenStore()
-    return _singletons["store"]  # type: ignore[return-value]
+    return cast(TokenStore, _singletons["store"])
 
 
 def _api() -> LinkedInClient:
     if "api" not in _singletons:
         _singletons["api"] = LinkedInClient(store=_store())
-    return _singletons["api"]  # type: ignore[return-value]
+    return cast(LinkedInClient, _singletons["api"])
 
 
 def _jobs() -> GuestJobsClient:
     if "jobs" not in _singletons:
         _singletons["jobs"] = GuestJobsClient()
-    return _singletons["jobs"]  # type: ignore[return-value]
+    return cast(GuestJobsClient, _singletons["jobs"])
 
 
 def _tracker() -> TrackerStore:
     if "tracker" not in _singletons:
         _singletons["tracker"] = TrackerStore()
-    return _singletons["tracker"]  # type: ignore[return-value]
+    return cast(TrackerStore, _singletons["tracker"])
 
 
 def build_auth_status() -> AuthStatus:
     settings = Settings.from_env()
     store = _store()
     data = store.load() or {}
-    profile = data.get("profile") or {}
+    profile = _mapping(data.get("profile"))
     token_valid = store.access_token() is not None
     if not settings.configured:
         # Saved tokens keep posting working even without app credentials in the
@@ -112,9 +152,9 @@ def build_auth_status() -> AuthStatus:
             configured=False,
             authenticated=token_valid,
             detail=detail,
-            scopes=data.get("scope"),
+            scopes=_optional_string(data.get("scope")),
             expires_at=store.expires_at_iso(),
-            profile_name=profile.get("name"),
+            profile_name=_optional_string(profile.get("name")),
             setup_instructions=None if token_valid else setup_instructions(settings),
         )
     if token_valid:
@@ -127,9 +167,9 @@ def build_auth_status() -> AuthStatus:
         configured=True,
         authenticated=token_valid,
         detail=detail,
-        scopes=data.get("scope"),
+        scopes=_optional_string(data.get("scope")),
         expires_at=store.expires_at_iso(),
-        profile_name=profile.get("name"),
+        profile_name=_optional_string(profile.get("name")),
     )
 
 
@@ -151,8 +191,8 @@ def login() -> LoginStarted:
     local callback completes the flow. Afterwards, call auth_status to confirm."""
     store = _store()
     if store.access_token():
-        profile = (store.load() or {}).get("profile") or {}
-        who = profile.get("name") or "an account"
+        profile = _mapping((store.load() or {}).get("profile"))
+        who = _optional_string(profile.get("name")) or "an account"
         return LoginStarted(
             authorization_url="",
             message=f"Already authenticated as {who}. Call `logout` first to switch accounts.",
@@ -161,11 +201,10 @@ def login() -> LoginStarted:
     if isinstance(flow, OAuthFlow) and not flow._done.is_set():
         return LoginStarted(
             authorization_url=flow.authorization_url(),
-            message="A login is already in progress — ask the user to open this URL, "
-            "then call auth_status.",
+            message="A login is already in progress — ask the user to open this URL, then call auth_status.",
         )
     flow = OAuthFlow(Settings.from_env(), store)
-    url = flow.start(open_browser=True)
+    url = flow.start(open_browser=Settings.from_env().open_browser)
     # Cache only after start() succeeds: a flow that never bound its listener must
     # not be reused by the in-progress guard above (its URL would be a dead end).
     _singletons["flow"] = flow
@@ -191,13 +230,13 @@ def get_my_profile() -> Profile:
     Requires login."""
     info = _api().userinfo()
     return Profile(
-        person_urn="urn:li:person:" + info["sub"],
-        name=info.get("name"),
-        given_name=info.get("given_name"),
-        family_name=info.get("family_name"),
-        email=info.get("email"),
+        person_urn="urn:li:person:" + _required_string(info.get("sub"), "profile subject"),
+        name=_optional_string(info.get("name")),
+        given_name=_optional_string(info.get("given_name")),
+        family_name=_optional_string(info.get("family_name")),
+        email=_optional_string(info.get("email")),
         locale=str(info.get("locale")) if info.get("locale") is not None else None,
-        picture=info.get("picture"),
+        picture=_optional_string(info.get("picture")),
     )
 
 
@@ -206,12 +245,7 @@ def get_my_profile() -> Profile:
 
 @mcp.tool()
 def create_post(
-    text: str,
-    visibility: Visibility = "PUBLIC",
-    link: str | None = None,
-    link_title: str | None = None,
-    link_description: str | None = None,
-    image_path: str | None = None,
+    post: CreatePostInput,
 ) -> PostResult:
     """Publish a LinkedIn post as the authenticated user. IMPORTANT: posts are
     public professional content — confirm the final text with the user before
@@ -220,10 +254,13 @@ def create_post(
     card) or `image_path` (local file to upload). LinkedIn rejects exact
     duplicates of recent posts and caps posting at 150/day."""
     article = None
-    if link:
-        article = {"url": link, "title": link_title, "description": link_description}
+    if post.link:
+        article = {"url": post.link, "title": post.link_title, "description": post.link_description}
     result = _api().create_post(
-        text=text, visibility=visibility, article=article, image_path=image_path
+        text=post.text,
+        visibility=post.visibility,
+        article=article,
+        image_path=post.image_path,
     )
     return PostResult(**result)
 
@@ -241,7 +278,12 @@ def comment_on_post(post: str, text: str) -> CommentResult:
     """Comment on a LinkedIn post as the authenticated user. `post` is a post URN
     (urn:li:share/ugcPost/activity:…) or a linkedin.com post URL. Confirm wording
     with the user first — comments are public."""
-    return CommentResult(**_api().comment(post, text))
+    result = _api().comment(post, text)
+    return CommentResult(
+        comment_urn=result["comment_urn"],
+        target_urn=_required_string(result["target_urn"], "comment target"),
+        message=_required_string(result["message"], "comment message"),
+    )
 
 
 @mcp.tool()
@@ -257,32 +299,15 @@ def like_post(post: str) -> str:
 
 @mcp.tool()
 def search_jobs(
-    keywords: str,
-    location: str | None = None,
-    workplace: Workplace | None = None,
-    time_posted: TimePosted = "any",
-    experience_levels: list[Experience] | None = None,
-    job_types: list[JobType] | None = None,
-    easy_apply: bool = False,
-    sort: Sort = "relevance",
-    limit: int = 25,
+    query: SearchJobsInput,
 ) -> JobSearchResults:
     """Search LinkedIn job postings (no login required; the user's account is never
     involved). `location` is free text like "Berlin", "India", or "United States";
     combine it with workplace="remote" for remote roles. `limit` max is 50 — keep
     it modest to avoid IP rate-limiting; on a rate-limit error, wait a minute
     before retrying. Use get_job with a result's job_id for the full description."""
-    limit = max(1, min(int(limit), 50))
-    params = build_search_params(
-        keywords=keywords,
-        location=location,
-        workplace=workplace,
-        time_posted=time_posted,
-        experience_levels=list(experience_levels) if experience_levels else None,
-        job_types=list(job_types) if job_types else None,
-        easy_apply=easy_apply,
-        sort=sort,
-    )
+    limit = max(1, min(int(query.limit), 50))
+    params = build_search_params(query)
     jobs = _jobs().search(params, limit=limit)
     note = None
     if not jobs:
@@ -308,20 +333,9 @@ def save_job(job: str, status: TrackStatus = "interested", note: str | None = No
     posting, including its description, so it survives delisting). Idempotent: if
     already saved, appends the note instead. `job` is a job_id, URL, or URN."""
     job_id = extract_job_id(job)
-    detail = None
-    with suppress(LinkedInError):  # posting gone or rate-limited — save the reference anyway
-        detail = _jobs().job(job_id)
-    saved, _created = _tracker().save(
-        job_id,
-        title=detail.title if detail else None,
-        company=detail.company if detail else None,
-        location=detail.location if detail else None,
-        url=detail.url if detail else None,
-        salary=detail.salary if detail else None,
-        description=detail.description if detail else None,
-        status=status,
-        note=note,
-    )
+    detail = _load_job_detail(job_id)
+    draft = _job_draft(job_id, status, note, detail)
+    saved, _created = _tracker().save(draft)
     return saved
 
 

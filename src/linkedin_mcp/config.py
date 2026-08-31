@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_REDIRECT_PORT = 8765
+DEFAULT_MCP_PORT = 8000
 # LinkedIn-Version header (YYYYMM) sent to /rest/* endpoints. LinkedIn sunsets
 # versions roughly a year after release; override with LINKEDIN_API_VERSION.
 DEFAULT_API_VERSION = "202606"
@@ -93,6 +94,9 @@ class Settings:
     redirect_port: int
     api_version: str
     posts_backend: str  # "auto" | "rest" | "ugc"
+    redirect_bind_host: str = "127.0.0.1"
+    redirect_uri_override: str | None = None
+    open_browser: bool = False
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -102,6 +106,9 @@ class Settings:
             redirect_port=int(os.environ.get("LINKEDIN_REDIRECT_PORT", DEFAULT_REDIRECT_PORT)),
             api_version=os.environ.get("LINKEDIN_API_VERSION", DEFAULT_API_VERSION),
             posts_backend=os.environ.get("LINKEDIN_POSTS_BACKEND", "auto").lower(),
+            redirect_bind_host=os.environ.get("LINKEDIN_REDIRECT_BIND_HOST", "127.0.0.1"),
+            redirect_uri_override=os.environ.get("LINKEDIN_REDIRECT_URI") or None,
+            open_browser=os.environ.get("LINKEDIN_OPEN_BROWSER", "false").lower() in {"1", "true", "yes"},
         )
 
     @property
@@ -110,7 +117,7 @@ class Settings:
         # loopback, but browsers routinely resolve "localhost" to ::1 first, so
         # another local account could bind [::1]:port and receive the
         # authorization code. RFC 8252 §8.3 requires the IP literal for this.
-        return f"http://127.0.0.1:{self.redirect_port}/callback"
+        return self.redirect_uri_override or f"http://127.0.0.1:{self.redirect_port}/callback"
 
     @property
     def configured(self) -> bool:
@@ -122,8 +129,7 @@ To enable LinkedIn posting, create a (free) LinkedIn developer app once:
 1. Go to https://www.linkedin.com/developers/apps and click "Create app".
 2. In the app's Products tab, add "Share on LinkedIn" and
    "Sign In with LinkedIn using OpenID Connect".
-3. In the Auth tab, add this Authorized redirect URL: http://127.0.0.1:{port}/callback
-   (it must be 127.0.0.1, not localhost — the two are not interchangeable here).
+3. In the Auth tab, add this Authorized redirect URL: {redirect_uri}
 4. Copy the Client ID and Client Secret from the Auth tab and export them where the
    MCP server runs, e.g. in the MCP client config:
      LINKEDIN_CLIENT_ID=...   LINKEDIN_CLIENT_SECRET=...
@@ -133,4 +139,4 @@ Job search tools work without any of this."""
 
 
 def setup_instructions(settings: Settings) -> str:
-    return SETUP_INSTRUCTIONS.format(port=settings.redirect_port)
+    return SETUP_INSTRUCTIONS.format(redirect_uri=settings.redirect_uri)

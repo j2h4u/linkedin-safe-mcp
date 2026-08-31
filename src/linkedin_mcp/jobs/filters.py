@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
+from ..models import SearchJobsInput
+
 TIME_POSTED = {
     "any": None,
     "past_24h": "r86400",
@@ -29,40 +33,33 @@ WORKPLACE = {"onsite": "1", "remote": "2", "hybrid": "3"}
 SORT = {"relevance": "R", "recent": "DD"}
 
 
-def _lookup(table: dict, value: str, what: str) -> str | None:
+def _lookup(table: Mapping[str, str | None], value: str, what: str) -> str | None:
     try:
         return table[value]
     except KeyError:
         raise ValueError(f"Unknown {what} {value!r}; allowed: {', '.join(table)}") from None
 
 
-def build_search_params(
-    keywords: str,
-    location: str | None = None,
-    workplace: str | None = None,
-    time_posted: str = "any",
-    experience_levels: list[str] | None = None,
-    job_types: list[str] | None = None,
-    easy_apply: bool = False,
-    sort: str = "relevance",
-) -> dict[str, str]:
-    params: dict[str, str] = {"keywords": keywords}
-    if location:
-        params["location"] = location
-    if workplace:
-        params["f_WT"] = _lookup(WORKPLACE, workplace, "workplace")
-    tpr = _lookup(TIME_POSTED, time_posted, "time_posted")
-    if tpr:
-        params["f_TPR"] = tpr
-    if experience_levels:
-        params["f_E"] = ",".join(
-            _lookup(EXPERIENCE, e, "experience level") for e in experience_levels
-        )
-    if job_types:
-        params["f_JT"] = ",".join(_lookup(JOB_TYPE, j, "job type") for j in job_types)
-    if easy_apply:
+def build_search_params(query: SearchJobsInput) -> dict[str, str]:
+    params: dict[str, str] = {"keywords": query.keywords}
+    if query.location:
+        params["location"] = query.location
+    if query.workplace:
+        workplace = _lookup(WORKPLACE, query.workplace, "workplace")
+        if workplace:
+            params["f_WT"] = workplace
+    time_posted = _lookup(TIME_POSTED, query.time_posted, "time_posted")
+    if time_posted:
+        params["f_TPR"] = time_posted
+    if query.experience_levels:
+        values = (_lookup(EXPERIENCE, value, "experience level") for value in query.experience_levels)
+        params["f_E"] = ",".join(value for value in values if value is not None)
+    if query.job_types:
+        values = (_lookup(JOB_TYPE, value, "job type") for value in query.job_types)
+        params["f_JT"] = ",".join(value for value in values if value is not None)
+    if query.easy_apply:
         params["f_AL"] = "true"
-    sort_value = _lookup(SORT, sort, "sort")
-    if sort_value:
-        params["sortBy"] = sort_value
+    sort = _lookup(SORT, query.sort, "sort")
+    if sort:
+        params["sortBy"] = sort
     return params

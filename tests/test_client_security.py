@@ -9,12 +9,14 @@ attempt that must fail closed.
 
 import os
 import time
+from pathlib import Path
 
+import httpx
 import pytest
 
 from linkedin_mcp.api.client import LinkedInClient
 from linkedin_mcp.auth.oauth import TokenStore
-from linkedin_mcp.errors import LinkedInError
+from linkedin_mcp.errors import LinkedInAPIError, LinkedInError, NotAuthenticatedError
 
 # Minimal well-formed images: correct magic AND the mandatory trailer each format
 # must end with (PNG's IEND chunk, JPEG's EOI marker, GIF's ";").
@@ -25,28 +27,82 @@ SECRET = b"-----BEGIN OPENSSH PRIVATE KEY-----\nDECOY\n"
 
 
 @pytest.fixture
-def client(tmp_path):
+def client(tmp_path: Path) -> LinkedInClient:
     store = TokenStore(path=tmp_path / "tokens.json")
     store.save({"access_token": "tok", "expires_at": time.time() + 1000})
     return LinkedInClient(store=store)
 
 
+@pytest.mark.parametrize(
+    "status,expected_type,expected_text",
+    [
+        (401, NotAuthenticatedError, "rejected the access token"),
+        (403, LinkedInAPIError, "missing a product/scope"),
+        (422, LinkedInAPIError, "exact duplicates"),
+        (429, LinkedInAPIError, "rate limited"),
+    ],
+)
+def test_api_errors_include_status_specific_guidance(
+    client: LinkedInClient, status: int, expected_type: type[LinkedInError], expected_text: str
+):
+    response = httpx.Response(status, json={"message": "request denied", "serviceErrorCode": 42})
+    with pytest.raises(expected_type, match=expected_text):
+        client._raise_api_error(response)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(500, json=["unexpected", "body"]),
+        httpx.Response(500, json={"detail": "fallback", "serviceErrorCode": True}),
+        httpx.Response(500, content=b"not json"),
+    ],
+)
+def test_api_errors_handle_unstructured_responses(client: LinkedInClient, response: httpx.Response):
+    with pytest.raises(LinkedInAPIError, match="LinkedIn API error 500"):
+        client._raise_api_error(response)
+
+
+@pytest.mark.parametrize(
+    "response,expected",
+    [
+        (httpx.Response(201, headers={"x-restli-id": "urn:li:share:header"}), "urn:li:share:header"),
+        (httpx.Response(201, json={"id": "urn:li:share:body"}), "urn:li:share:body"),
+    ],
+)
+def test_created_urn_uses_header_then_json(response: httpx.Response, expected: str):
+    assert LinkedInClient._created_urn(response) == expected
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(201, json={"id": 123}),
+        httpx.Response(201, json=["not an object"]),
+        httpx.Response(201, content=b"not json"),
+    ],
+)
+def test_created_urn_rejects_missing_or_invalid_ids(response: httpx.Response):
+    with pytest.raises(LinkedInAPIError, match="no ID returned"):
+        LinkedInClient._created_urn(response)
+
+
 @pytest.mark.parametrize("data,name", [(PNG, "a.png"), (JPEG, "b.jpg"), (GIF, "c.gif")])
-def test_real_images_are_accepted(client, tmp_path, data, name):
+def test_real_images_are_accepted(client: LinkedInClient, tmp_path: Path, data: bytes, name: str):
     path = tmp_path / name
     path.write_bytes(data)
     assert client._read_image(str(path)) == data
 
 
-def test_rejects_secret_file_by_extension(client, tmp_path):
+def test_rejects_secret_file_by_extension(client: LinkedInClient, tmp_path: Path):
     """The classic payload: a private key, named as itself."""
     key = tmp_path / "id_rsa"
     key.write_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----\nDECOY\n")
-    with pytest.raises(ValueError, match="only .* files can be posted"):
+    with pytest.raises(ValueError, match=r"only .* files can be posted"):
         client._read_image(str(key))
 
 
-def test_rejects_secret_file_renamed_to_png(client, tmp_path):
+def test_rejects_secret_file_renamed_to_png(client: LinkedInClient, tmp_path: Path):
     """Extension allowlists are trivially bypassed — magic bytes are the real check."""
     disguised = tmp_path / "holiday.png"
     disguised.write_bytes(b"LINKEDIN_CLIENT_SECRET=DECOY\nAWS_SECRET_ACCESS_KEY=DECOY\n")
@@ -54,7 +110,7 @@ def test_rejects_secret_file_renamed_to_png(client, tmp_path):
         client._read_image(str(disguised))
 
 
-def test_rejects_symlink_pointing_at_a_secret(client, tmp_path):
+def test_rejects_symlink_pointing_at_a_secret(client: LinkedInClient, tmp_path: Path):
     """A .png symlink must not launder a non-image target.
 
     resolve() collapses the link first, so the real target's extension is what
@@ -64,11 +120,11 @@ def test_rejects_symlink_pointing_at_a_secret(client, tmp_path):
     secret.write_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----\nDECOY\n")
     link = tmp_path / "innocent.png"
     link.symlink_to(secret)
-    with pytest.raises(ValueError, match="only .* files can be posted"):
+    with pytest.raises(ValueError, match=r"only .* files can be posted"):
         client._read_image(str(link))
 
 
-def test_rejects_symlink_with_matching_extension(client, tmp_path):
+def test_rejects_symlink_with_matching_extension(client: LinkedInClient, tmp_path: Path):
     """Even when the target also ends .png, its contents must still be a real image."""
     secret = tmp_path / "secrets.png"
     secret.write_bytes(b"LINKEDIN_CLIENT_SECRET=DECOY\n")
@@ -78,7 +134,7 @@ def test_rejects_symlink_with_matching_extension(client, tmp_path):
         client._read_image(str(link))
 
 
-def test_rejects_oversized_file(client, tmp_path, monkeypatch):
+def test_rejects_oversized_file(client: LinkedInClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("linkedin_mcp.api.client._IMAGE_MAX_BYTES", 1024)
     big = tmp_path / "big.png"
     big.write_bytes(PNG[:8] + b"\x00" * 4096)
@@ -86,15 +142,15 @@ def test_rejects_oversized_file(client, tmp_path, monkeypatch):
         client._read_image(str(big))
 
 
-def test_rejects_directory_and_missing_file(client, tmp_path):
+def test_rejects_directory_and_missing_file(client: LinkedInClient, tmp_path: Path):
     (tmp_path / "adir.png").mkdir()
-    with pytest.raises(ValueError, match="not found|not a regular file"):
+    with pytest.raises(ValueError, match=r"not found|not a regular file"):
         client._read_image(str(tmp_path / "adir.png"))
     with pytest.raises(ValueError, match="not found"):
         client._read_image(str(tmp_path / "nope.png"))
 
 
-def test_confinement_dir_blocks_outside_paths(client, tmp_path, monkeypatch):
+def test_confinement_dir_blocks_outside_paths(client: LinkedInClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     allowed = tmp_path / "pics"
     allowed.mkdir()
     inside = allowed / "ok.png"
@@ -108,7 +164,9 @@ def test_confinement_dir_blocks_outside_paths(client, tmp_path, monkeypatch):
         client._read_image(str(outside))
 
 
-def test_confinement_dir_cannot_be_escaped_by_traversal(client, tmp_path, monkeypatch):
+def test_confinement_dir_cannot_be_escaped_by_traversal(
+    client: LinkedInClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     allowed = tmp_path / "pics"
     allowed.mkdir()
     outside = tmp_path / "secret.png"
@@ -119,7 +177,9 @@ def test_confinement_dir_cannot_be_escaped_by_traversal(client, tmp_path, monkey
         client._read_image(str(allowed / ".." / "secret.png"))
 
 
-def test_confinement_dir_cannot_be_escaped_by_symlink(client, tmp_path, monkeypatch):
+def test_confinement_dir_cannot_be_escaped_by_symlink(
+    client: LinkedInClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     allowed = tmp_path / "pics"
     allowed.mkdir()
     outside = tmp_path / "secret.png"
@@ -141,7 +201,7 @@ def test_confinement_dir_cannot_be_escaped_by_symlink(client, tmp_path, monkeypa
         "https://media.licdn.com/upload/xyz",
     ],
 )
-def test_accepts_linkedin_upload_hosts(url):
+def test_accepts_linkedin_upload_hosts(url: str):
     assert LinkedInClient._checked_upload_url(url) == url
 
 
@@ -155,7 +215,7 @@ def test_accepts_linkedin_upload_hosts(url):
         "https://notlinkedin.com/upload",
     ],
 )
-def test_rejects_non_linkedin_upload_targets(url):
+def test_rejects_non_linkedin_upload_targets(url: str):
     """The upload URL comes from a LinkedIn API response; never PUT the Bearer
     token somewhere else on its say-so."""
     with pytest.raises(LinkedInError, match="Nothing was sent"):
@@ -165,7 +225,7 @@ def test_rejects_non_linkedin_upload_targets(url):
 # ------------------------------------------------- end-to-end exfiltration chain
 
 
-def test_create_post_never_uploads_a_non_image(client, tmp_path, monkeypatch):
+def test_create_post_never_uploads_a_non_image(client: LinkedInClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """The full chain a prompt injection would use, proven to fail closed.
 
     The original bug PUT the file's bytes to LinkedIn *before* the post was
@@ -176,17 +236,15 @@ def test_create_post_never_uploads_a_non_image(client, tmp_path, monkeypatch):
     secret.write_bytes(b"-----BEGIN OPENSSH PRIVATE KEY-----\nDECOY\n")
 
     uploaded: list[bytes] = []
-    monkeypatch.setattr(
-        LinkedInClient, "_upload_binary", lambda self, url, data: uploaded.append(data)
-    )
-    monkeypatch.setattr(LinkedInClient, "person_urn", lambda self: "urn:li:person:x")
+    monkeypatch.setattr(LinkedInClient, "_upload_binary", lambda _self, _url, data: uploaded.append(data))
+    monkeypatch.setattr(LinkedInClient, "person_urn", lambda _self: "urn:li:person:x")
     monkeypatch.setattr(
         LinkedInClient,
         "_request",
-        lambda *a, **k: pytest.fail("no HTTP request should be attempted"),
+        lambda *_args, **_kwargs: pytest.fail("no HTTP request should be attempted"),
     )
 
-    with pytest.raises(ValueError, match="only .* files can be posted"):
+    with pytest.raises(ValueError, match=r"only .* files can be posted"):
         client.create_post(text="hi", image_path=str(secret))
     assert uploaded == []  # nothing left the machine
 
@@ -194,7 +252,7 @@ def test_create_post_never_uploads_a_non_image(client, tmp_path, monkeypatch):
 # -------------------------------------------------------------- client state file
 
 
-def test_state_file_is_private(client, tmp_path, monkeypatch):
+def test_state_file_is_private(client: LinkedInClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """state.json sits beside the token in the data dir; keep the whole dir 0600."""
     monkeypatch.setenv("LINKEDIN_MCP_DIR", str(tmp_path / "data"))
     client._remember_backend("rest")
@@ -212,7 +270,7 @@ def test_state_file_is_private(client, tmp_path, monkeypatch):
         (b"GIF89a", "c.gif"),
     ],
 )
-def test_rejects_polyglot_header_then_secret(client, tmp_path, header, name):
+def test_rejects_polyglot_header_then_secret(client: LinkedInClient, tmp_path: Path, header: bytes, name: str):
     """A magic-byte prefix check alone is a `startswith` — so the file is a carrier.
 
     Prepending a real header to a secret defeated the first version of this
@@ -225,7 +283,7 @@ def test_rejects_polyglot_header_then_secret(client, tmp_path, header, name):
         client._read_image(str(path))
 
 
-def test_rejects_secret_appended_after_a_valid_image(client, tmp_path):
+def test_rejects_secret_appended_after_a_valid_image(client: LinkedInClient, tmp_path: Path):
     """Even a genuinely valid image must not carry a payload past its trailer."""
     path = tmp_path / "real.png"
     path.write_bytes(PNG + SECRET)
@@ -233,14 +291,14 @@ def test_rejects_secret_appended_after_a_valid_image(client, tmp_path):
         client._read_image(str(path))
 
 
-def test_rejects_truncated_image(client, tmp_path):
+def test_rejects_truncated_image(client: LinkedInClient, tmp_path: Path):
     path = tmp_path / "cut.png"
     path.write_bytes(PNG[:-4])
     with pytest.raises(ValueError, match="does not end like one"):
         client._read_image(str(path))
 
 
-def test_rejects_hardlink(client, tmp_path):
+def test_rejects_hardlink(client: LinkedInClient, tmp_path: Path):
     """resolve() cannot see through a hardlink, so it is the one way to smuggle a
     file into LINKEDIN_MCP_IMAGE_DIR. Refuse multiply-linked files outright."""
     target = tmp_path / "original.png"
@@ -251,7 +309,7 @@ def test_rejects_hardlink(client, tmp_path):
         client._read_image(str(link))
 
 
-def test_hardlink_cannot_escape_confinement(client, tmp_path, monkeypatch):
+def test_hardlink_cannot_escape_confinement(client: LinkedInClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     allowed = tmp_path / "pics"
     allowed.mkdir()
     outside = tmp_path / "outside.png"
@@ -263,7 +321,7 @@ def test_hardlink_cannot_escape_confinement(client, tmp_path, monkeypatch):
         client._read_image(str(allowed / "smuggled.png"))
 
 
-def test_fifo_does_not_hang_the_server(client, tmp_path):
+def test_fifo_does_not_hang_the_server(client: LinkedInClient, tmp_path: Path):
     """os.open() on a writer-less FIFO blocks forever without O_NONBLOCK.
 
     The pre-hardening code used is_file(), which returns False for a FIFO and so
@@ -276,7 +334,7 @@ def test_fifo_does_not_hang_the_server(client, tmp_path):
         client._read_image(str(fifo))
 
 
-def test_accepts_uppercase_extensions(client, tmp_path):
+def test_accepts_uppercase_extensions(client: LinkedInClient, tmp_path: Path):
     """Guard against the hardening becoming a usability regression."""
     for name, data in (("A.PNG", PNG), ("B.JpEg", JPEG), ("C.Gif", GIF)):
         path = tmp_path / name
@@ -296,6 +354,6 @@ def test_accepts_uppercase_extensions(client, tmp_path):
         "https://a@b@www.linkedin.com/u",  # urlparse itself raises here
     ],
 )
-def test_upload_url_host_parsing_edge_cases(url):
+def test_upload_url_host_parsing_edge_cases(url: str):
     with pytest.raises(LinkedInError, match="Nothing was sent"):
         LinkedInClient._checked_upload_url(url)

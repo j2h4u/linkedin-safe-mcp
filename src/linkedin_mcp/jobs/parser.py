@@ -42,6 +42,14 @@ def _href(el: Tag | None) -> str | None:
     return str(el["href"]).split("?")[0] or None
 
 
+def _string_attribute(el: Tag | None, name: str) -> str | None:
+    """Return an HTML attribute only when BeautifulSoup parsed it as text."""
+    if el is None:
+        return None
+    value = el.get(name)
+    return value if isinstance(value, str) else None
+
+
 def _block_text(el: Tag | None) -> str | None:
     """Readable plain text from rich description HTML (bullets kept, spacing sane)."""
     if el is None:
@@ -62,7 +70,7 @@ def parse_search_results(html: str) -> list[JobCard]:
     soup = BeautifulSoup(html, "html.parser")
     cards: list[JobCard] = []
     for div in soup.select("div.base-search-card"):
-        match = _JOB_URN_RE.search(div.get("data-entity-urn") or "")
+        match = _JOB_URN_RE.search(_string_attribute(div, "data-entity-urn") or "")
         if not match:
             continue
         job_id = match.group(1)
@@ -72,12 +80,11 @@ def parse_search_results(html: str) -> list[JobCard]:
             JobCard(
                 job_id=job_id,
                 title=_text(div.select_one("h3.base-search-card__title")),
-                company=_text(company_link)
-                or _text(div.select_one("h4.base-search-card__subtitle")),
+                company=_text(company_link) or _text(div.select_one("h4.base-search-card__subtitle")),
                 location=_text(div.select_one("span.job-search-card__location")),
                 url=_href(div.select_one("a.base-card__full-link")) or job_url(job_id),
                 company_url=_href(company_link),
-                posted_date=time_el.get("datetime") if time_el else None,
+                posted_date=_string_attribute(time_el, "datetime"),
                 posted_text=_text(time_el),
                 salary=_text(div.select_one(".job-search-card__salary-info")),
             )
@@ -113,8 +120,7 @@ def parse_job_detail(html: str, job_id: str) -> JobDetail:
         url=job_url(job_id),
         posted_text=_text(soup.select_one("span.posted-time-ago__text")),
         applicants=_text(soup.select_one(".num-applicants__caption")),
-        salary=_text(soup.select_one("div.compensation__salary"))
-        or _text(soup.select_one(".salary")),
+        salary=_text(soup.select_one("div.compensation__salary")) or _text(soup.select_one(".salary")),
         apply_url=apply_url,
         description=_block_text(soup.select_one("div.show-more-less-html__markup")),
         **criteria,

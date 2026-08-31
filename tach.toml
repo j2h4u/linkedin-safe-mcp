@@ -1,0 +1,111 @@
+# Module boundaries, enforced by tach (https://github.com/tach-org/tach).
+#
+# Tach complements import-linter: import-linter is good for named architectural
+# contracts, while Tach keeps the full module graph explicit. `exact = true`
+# makes stale declared dependencies fail after code stops importing them.
+
+source_roots = ["src"]
+# CLI imports package metadata from linkedin_mcp.__init__; Tach's synthetic root
+# is therefore ignored while every real module edge remains exact below.
+root_module = "ignore"
+exact = true
+layers_explicit_depends_on = true
+forbid_circular_dependencies = true
+ignore_type_checking_imports = false
+
+layers = [
+    "delivery",
+    "domain",
+]
+
+[[modules]]
+path = "linkedin_mcp.cli"
+layer = "delivery"
+depends_on = [
+    "linkedin_mcp.api.client",
+    "linkedin_mcp.auth.oauth",
+    "linkedin_mcp.config",
+    "linkedin_mcp.errors",
+    "linkedin_mcp.server",
+]
+
+[[modules]]
+path = "linkedin_mcp.server"
+layer = "delivery"
+depends_on = [
+    "linkedin_mcp.api.client",
+    "linkedin_mcp.api.urns",
+    "linkedin_mcp.auth.oauth",
+    "linkedin_mcp.config",
+    "linkedin_mcp.errors",
+    "linkedin_mcp.jobs.filters",
+    "linkedin_mcp.jobs.guest_client",
+    "linkedin_mcp.models",
+    "linkedin_mcp.tracker.store",
+]
+
+[[modules]]
+path = "linkedin_mcp.api.client"
+layer = "domain"
+depends_on = [
+    "linkedin_mcp.api.ltf",
+    "linkedin_mcp.api.urns",
+    "linkedin_mcp.auth.oauth",
+    "linkedin_mcp.config",
+    "linkedin_mcp.errors",
+]
+
+[[modules]]
+path = "linkedin_mcp.api.ltf"
+layer = "domain"
+depends_on = []
+
+[[modules]]
+path = "linkedin_mcp.api.urns"
+layer = "domain"
+depends_on = []
+
+[[modules]]
+path = "linkedin_mcp.auth.oauth"
+layer = "domain"
+depends_on = ["linkedin_mcp.config", "linkedin_mcp.errors"]
+
+[[modules]]
+path = "linkedin_mcp.config"
+layer = "domain"
+depends_on = []
+
+[[modules]]
+path = "linkedin_mcp.errors"
+layer = "domain"
+depends_on = []
+
+[[modules]]
+path = "linkedin_mcp.jobs.filters"
+layer = "domain"
+depends_on = ["linkedin_mcp.models"]
+
+[[modules]]
+path = "linkedin_mcp.jobs.guest_client"
+layer = "domain"
+depends_on = [
+    "linkedin_mcp.api.urns",
+    "linkedin_mcp.errors",
+    "linkedin_mcp.jobs.parser",
+    "linkedin_mcp.models",
+]
+
+[[modules]]
+path = "linkedin_mcp.jobs.parser"
+layer = "domain"
+depends_on = ["linkedin_mcp.api.urns", "linkedin_mcp.models"]
+
+[[modules]]
+path = "linkedin_mcp.models"
+layer = "domain"
+depends_on = []
+
+[[modules]]
+path = "linkedin_mcp.tracker.store"
+layer = "domain"
+depends_on = ["linkedin_mcp.config", "linkedin_mcp.errors", "linkedin_mcp.models"]

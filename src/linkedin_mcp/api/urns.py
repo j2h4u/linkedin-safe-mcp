@@ -12,9 +12,7 @@ from urllib.parse import quote
 _POST_URN_RE = re.compile(r"urn:li:(?:share|ugcPost|activity):\d+")
 # e.g. linkedin.com/posts/jane-doe_ai-agents-activity-7215551234567890123-Ab_C
 _ACTIVITY_SLUG_RE = re.compile(r"activity[-:](\d{10,25})")
-_JOB_ID_RE = re.compile(
-    r"(?:jobPosting[:/]|jobs/view/(?:[^/?#]*?-)?|currentJobId=)(\d{6,15})(?=[/?#&]|$)"
-)
+_JOB_ID_RE = re.compile(r"(?:jobPosting[:/]|jobs/view/(?:[^/?#]*?-)?|currentJobId=)(\d{6,15})(?=[/?#&]|$)")
 
 
 def extract_post_urn(value: str) -> str:

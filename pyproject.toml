@@ -14,17 +14,18 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-  "mcp>=2.0.0",
+  "mcp==2.1.1",
   "httpx>=0.27",
   "beautifulsoup4>=4.12",
   "pydantic>=2.7",
+  "starlette>=0.48",
 ]
 
 [project.scripts]
 linkedin-safe-mcp = "linkedin_mcp.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/AmmYoo7/linkedin-safe-mcp"
+Homepage = "https://github.com/j2h4u/linkedin-safe-mcp"
 
 [build-system]
 requires = ["hatchling"]
@@ -33,16 +34,143 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/linkedin_mcp"]
 
-[dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6"]
-
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["src"]
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 1
+addopts = [
+  "--strict-config",
+  "--strict-markers",
+  "-W",
+  "error",
+]
+xfail_strict = true
+markers = [
+  "integration: tests that cross process, service, container, or network boundaries",
+  "slow: tests that are too slow for the default unit gate",
+]
 
 [tool.ruff]
-line-length = 100
-target-version = "py311"
+src = ["src", "scripts", "tests"]
+line-length = 120
+target-version = "py314"
+extend-exclude = [".planning"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+explicit-preview-rules = true
+select = [
+  "E4",
+  "E7",
+  "E9",
+  "F",
+  "I",
+  "B",
+  "BLE",
+  "UP",
+  "C4",
+  "PIE",
+  "RET",
+  "ISC",
+  "RSE",
+  "FLY",
+  "FURB",
+  "RUF",
+  "PERF",
+  "SIM",
+  "PTH",
+  "DTZ",
+  "PGH",
+  "PLE",
+  "LOG",
+  "G",
+  "N818",
+  "ARG",
+  "C90",
+  "PLR09",
+  "PLR17",
+  "PLR2004",
+]
+ignore = ["ISC001"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["DTZ", "PERF401", "PLR2004"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pyright]
+include = ["src/linkedin_mcp", "scripts", "tests"]
+pythonVersion = "3.14"
+typeCheckingMode = "standard"
+reportAny = "error"
+reportExplicitAny = "error"
+reportUnknownVariableType = "none"
+reportUnknownArgumentType = "none"
+reportUnknownMemberType = "none"
+reportUnknownParameterType = "none"
+reportUnknownLambdaType = "none"
+reportMissingParameterType = "error"
+reportMissingTypeArgument = "none"
+reportUnannotatedClassAttribute = "none"
+reportUnusedCallResult = "none"
+reportImplicitStringConcatenation = "none"
+reportPrivateUsage = "none"
+
+[tool.vulture]
+paths = ["src/linkedin_mcp", "scripts", "tests"]
+min_confidence = 80
+ignore_decorators = ["@mcp.custom_route", "@mcp.tool"]
+
+[tool.coverage.run]
+source = ["src/linkedin_mcp"]
+branch = true
+sigterm = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.importlinter]
+root_package = "linkedin_mcp"
+
+[[tool.importlinter.contracts]]
+id = "domain-independent-from-delivery"
+name = "Domain modules stay independent from MCP and CLI delivery"
+type = "forbidden"
+source_modules = [
+  "linkedin_mcp.api",
+  "linkedin_mcp.auth",
+  "linkedin_mcp.jobs",
+  "linkedin_mcp.tracker",
+]
+forbidden_modules = ["linkedin_mcp.cli", "linkedin_mcp.server"]
+
+[tool.linkedin_mcp.suppressions]
+paths = ["src", "scripts", "tests", "pyproject.toml", "Justfile", ".github/workflows"]
+
+[tool.linkedin_mcp.suppressions.baseline]
+noqa = 0
+type_ignore = 0
+pyright = 0
+pylint = 0
+ruff = 0
+
+[dependency-groups]
+dev = [
+  "actionlint-py>=1.7.12.24",
+  "basedpyright>=1.39.10",
+  "deptry>=0.25.1",
+  "import-linter>=2.13",
+  "pip-audit>=2.10.1",
+  "pytest>=9.1.1",
+  "pytest-asyncio>=1.4.0",
+  "pytest-cov>=7",
+  "pytest-crap>=0.3.0",
+  "pytest-xdist>=3.8.0",
+  "radon>=6.0.1",
+  "ruff>=0.16.3",
+  "tach>=0.35.0",
+  "vulture>=2.16",
+]

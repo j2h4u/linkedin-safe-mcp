@@ -17,9 +17,9 @@ import json
 import logging
 import os
 import stat
-from contextlib import suppress
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import cast
 from urllib.parse import urlparse
 
 import httpx
@@ -34,6 +34,12 @@ logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.linkedin.com"
 _FALLBACK_STATUSES = {403, 426}
+_HTTP_BAD_REQUEST = 400
+_HTTP_UNAUTHORIZED = 401
+_HTTP_REDIRECT = 300
+
+type JsonValue = bool | int | float | str | list[JsonValue] | Mapping[str, JsonValue] | None
+type Article = Mapping[str, str | None]
 
 # --------------------------------------------------------------- upload guards
 
@@ -73,10 +79,10 @@ def build_rest_post_payload(
     author: str,
     text: str,
     visibility: str,
-    article: dict | None = None,
+    article: Article | None = None,
     image_urn: str | None = None,
-) -> dict:
-    payload: dict[str, Any] = {
+) -> dict[str, JsonValue]:
+    payload: dict[str, JsonValue] = {
         "author": author,
         "commentary": escape_little_text(text),
         "visibility": visibility,
@@ -89,13 +95,15 @@ def build_rest_post_payload(
         "isReshareDisabledByAuthor": False,
     }
     if article:
-        content: dict[str, Any] = {
-            "source": article["url"],
+        article_url = _article_url(article)
+        content: dict[str, JsonValue] = {
+            "source": article_url,
             # title is required by the rest backend; fall back to the URL itself
-            "title": article.get("title") or article["url"],
+            "title": article.get("title") or article_url,
         }
-        if article.get("description"):
-            content["description"] = article["description"]
+        description = article.get("description")
+        if description:
+            content["description"] = description
         payload["content"] = {"article": content}
     elif image_urn:
         payload["content"] = {"media": {"id": image_urn}}
@@ -106,19 +114,21 @@ def build_ugc_post_payload(
     author: str,
     text: str,
     visibility: str,
-    article: dict | None = None,
+    article: Article | None = None,
     image_asset: str | None = None,
-) -> dict:
-    share_content: dict[str, Any] = {
+) -> dict[str, JsonValue]:
+    share_content: dict[str, JsonValue] = {
         "shareCommentary": {"text": text},
         "shareMediaCategory": "NONE",
     }
     if article:
-        media: dict[str, Any] = {"status": "READY", "originalUrl": article["url"]}
-        if article.get("title"):
-            media["title"] = {"text": article["title"]}
-        if article.get("description"):
-            media["description"] = {"text": article["description"]}
+        media: dict[str, JsonValue] = {"status": "READY", "originalUrl": _article_url(article)}
+        title = article.get("title")
+        if title:
+            media["title"] = {"text": title}
+        description = article.get("description")
+        if description:
+            media["description"] = {"text": description}
         share_content["shareMediaCategory"] = "ARTICLE"
         share_content["media"] = [media]
     elif image_asset:
@@ -130,6 +140,63 @@ def build_ugc_post_payload(
         "specificContent": {"com.linkedin.ugc.ShareContent": share_content},
         "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": visibility},
     }
+
+
+def _article_url(article: Article) -> str:
+    url = article.get("url")
+    if not isinstance(url, str) or not url:
+        raise ValueError("An article must include a non-empty URL.")
+    return url
+
+
+def _string_mapping(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {key: item for key, item in value.items() if isinstance(key, str)}
+
+
+def _required_string(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise LinkedInError(f"LinkedIn response did not contain a valid {field}.")
+    return value
+
+
+def _required_mapping(value: object, context: str) -> dict[str, object]:
+    result = _string_mapping(value)
+    if not result:
+        raise LinkedInError(f"LinkedIn response did not contain {context}.")
+    return result
+
+
+def _response_json(response: httpx.Response) -> object:
+    payload: object = cast(object, response.json())
+    assert payload is None or isinstance(payload, (Mapping, list, str, int, float, bool))
+    return payload
+
+
+def _api_error_details(response: httpx.Response) -> tuple[str, int | None]:
+    try:
+        body = _response_json(response)
+    except ValueError:
+        return response.text[:300], None
+    if not isinstance(body, Mapping):
+        return json.dumps(body, default=str)[:300], None
+    message_value = body.get("message")
+    message = message_value if isinstance(message_value, str) and message_value else json.dumps(body, default=str)[:300]
+    code_value = body.get("serviceErrorCode")
+    code = code_value if isinstance(code_value, int) and not isinstance(code_value, bool) else None
+    return message, code
+
+
+def _response_urn(response: httpx.Response) -> str:
+    try:
+        payload = _response_json(response)
+    except ValueError:
+        return ""
+    if not isinstance(payload, Mapping):
+        return ""
+    value = payload.get("id")
+    return value if isinstance(value, str) else ""
 
 
 # ------------------------------------------------------------------------ client
@@ -171,27 +238,27 @@ class LinkedInClient:
         return headers
 
     def _request(
-        self, method: str, path: str, *, versioned: bool = False, **kwargs
+        self,
+        method: str,
+        path: str,
+        *,
+        versioned: bool = False,
+        json: JsonValue | None = None,
     ) -> httpx.Response:
-        resp = self._http.request(
-            method, API_BASE + path, headers=self._headers(versioned), **kwargs
-        )
-        if resp.status_code >= 400:
+        if json is None:
+            resp = self._http.request(method, API_BASE + path, headers=self._headers(versioned))
+        else:
+            resp = self._http.request(method, API_BASE + path, headers=self._headers(versioned), json=json)
+        if resp.status_code >= _HTTP_BAD_REQUEST:
             self._raise_api_error(resp)
         return resp
 
     def _raise_api_error(self, resp: httpx.Response) -> None:
-        try:
-            body = resp.json()
-            message = body.get("message") or json.dumps(body)[:300]
-            code = body.get("serviceErrorCode")
-        except Exception:
-            message, code = resp.text[:300], None
+        message, code = _api_error_details(resp)
         status = resp.status_code
-        if status == 401:
+        if status == _HTTP_UNAUTHORIZED:
             raise NotAuthenticatedError(
-                f"LinkedIn rejected the access token (401: {message}). "
-                "Re-run the `login` tool to get a fresh token."
+                f"LinkedIn rejected the access token (401: {message}). Re-run the `login` tool to get a fresh token."
             )
         hints = {
             403: (
@@ -200,26 +267,26 @@ class LinkedInClient:
                 "LinkedIn using OpenID Connect'."
             ),
             422: " Hint: LinkedIn rejects exact duplicates of a recent post; vary the text.",
-            429: (
-                " Hint: rate limited. Member posting is capped at 150 requests/day "
-                "(UTC); try again later."
-            ),
+            429: (" Hint: rate limited. Member posting is capped at 150 requests/day (UTC); try again later."),
         }
         raise LinkedInAPIError(status, message + hints.get(status, ""), code)
 
     # ------------------------------------------------------------------ identity
 
-    def userinfo(self, refresh: bool = False) -> dict:
+    def userinfo(self, refresh: bool = False) -> dict[str, object]:
         if not refresh:
-            cached = (self.store.load() or {}).get("profile")
-            if cached:
-                return cached
-        data = self._request("GET", "/v2/userinfo").json()
-        self.store.update(profile=data)
-        return data
+            stored: object = self.store.load()
+            if isinstance(stored, Mapping):
+                cached = stored.get("profile")
+                if isinstance(cached, Mapping):
+                    return _string_mapping(cached)
+        data = _response_json(self._request("GET", "/v2/userinfo"))
+        profile = _required_mapping(data, "a profile")
+        self.store.update(profile=profile)
+        return profile
 
     def person_urn(self) -> str:
-        return "urn:li:person:" + self.userinfo()["sub"]
+        return "urn:li:person:" + _required_string(self.userinfo().get("sub"), "profile subject")
 
     # ------------------------------------------------------- backend persistence
 
@@ -227,13 +294,13 @@ class LinkedInClient:
     def _state_path(self) -> Path:
         return data_dir() / "state.json"
 
-    def _load_state(self) -> dict:
+    def _load_state(self) -> dict[str, object]:
         try:
-            data = json.loads(self._state_path.read_text())
-        except (FileNotFoundError, json.JSONDecodeError):
+            data: object = cast(object, json.loads(self._state_path.read_text(encoding="utf-8")))
+        except FileNotFoundError, json.JSONDecodeError:
             return {}
         ensure_private(self._state_path)  # tighten a file written by an older version
-        return data
+        return _string_mapping(data)
 
     def _remember_backend(self, backend: str) -> None:
         state = self._load_state()
@@ -258,9 +325,9 @@ class LinkedInClient:
         self,
         text: str,
         visibility: str = "PUBLIC",
-        article: dict | None = None,
+        article: Article | None = None,
         image_path: str | None = None,
-    ) -> dict:
+    ) -> dict[str, str]:
         if article and image_path:
             raise ValueError("A post can attach a link or an image, not both.")
         author = self.person_urn()
@@ -285,6 +352,8 @@ class LinkedInClient:
                 "backend": backend,
                 "visibility": visibility,
             }
+        if last_error is None:
+            raise LinkedInError("No posting backend was available.")
         raise last_error  # both backends refused
 
     def _create_post_rest(
@@ -292,7 +361,7 @@ class LinkedInClient:
         author: str,
         text: str,
         visibility: str,
-        article: dict | None,
+        article: Article | None,
         image_path: str | None,
     ) -> str:
         image_urn = self._upload_image_rest(author, image_path) if image_path else None
@@ -305,7 +374,7 @@ class LinkedInClient:
         author: str,
         text: str,
         visibility: str,
-        article: dict | None,
+        article: Article | None,
         image_path: str | None,
     ) -> str:
         image_asset = self._upload_image_ugc(author, image_path) if image_path else None
@@ -315,44 +384,18 @@ class LinkedInClient:
 
     @staticmethod
     def _created_urn(resp: httpx.Response) -> str:
-        urn = resp.headers.get("x-restli-id")
+        header_value: object = cast(object, resp.headers.get("x-restli-id"))
+        urn = header_value if isinstance(header_value, str) else ""
         if not urn:
-            try:
-                urn = resp.json().get("id", "")
-            except Exception:
-                urn = ""
+            urn = _response_urn(resp)
         if not urn:
             raise LinkedInAPIError(resp.status_code, "Post created but no ID returned")
         return urn
 
     # -------------------------------------------------------------- image upload
 
-    def _read_image(self, image_path: str) -> bytes:
-        """Read a local image for upload, refusing anything that isn't really an image.
-
-        Deliberately strict — see the _IMAGE_MAGIC comment above for why this is a
-        security boundary and not mere input tidiness.
-        """
-        try:
-            # resolve() collapses symlinks and traversal so the confinement
-            # check below cannot be walked around with a link or '..'.
-            path = Path(image_path).expanduser().resolve(strict=True)
-        except (OSError, RuntimeError) as exc:
-            raise ValueError(f"Image file not found: {image_path}") from exc
-
-        suffix = path.suffix.lower()
-        if suffix not in _IMAGE_MAGIC:
-            raise ValueError(
-                f"Refusing to attach {path.name!r}: only "
-                f"{', '.join(sorted(_IMAGE_MAGIC))} files can be posted."
-            )
-
-        root = image_root()
-        if root is not None and not path.is_relative_to(root):
-            raise ValueError(
-                f"Refusing to attach {path}: LINKEDIN_MCP_IMAGE_DIR confines uploads to {root}."
-            )
-
+    @staticmethod
+    def _read_regular_file(path: Path) -> bytes:
         # O_NONBLOCK matters: without it, os.open() on a FIFO with no writer blocks
         # forever and wedges this thread — an agent-reachable hang. It is a no-op for
         # regular files, which are all we go on to accept. O_NOFOLLOW is
@@ -381,15 +424,36 @@ class LinkedInClient:
                     break
                 chunks.append(chunk)
                 remaining -= len(chunk)
+            return b"".join(chunks)
         finally:
             os.close(fd)
 
-        data = b"".join(chunks)
-        if len(data) > _IMAGE_MAX_BYTES:
+    def _read_image(self, image_path: str) -> bytes:
+        """Read a local image for upload, refusing anything that isn't really an image.
+
+        Deliberately strict — see the _IMAGE_MAGIC comment above for why this is a
+        security boundary and not mere input tidiness.
+        """
+        try:
+            # resolve() collapses symlinks and traversal so the confinement
+            # check below cannot be walked around with a link or '..'.
+            path = Path(image_path).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"Image file not found: {image_path}") from exc
+
+        suffix = path.suffix.lower()
+        if suffix not in _IMAGE_MAGIC:
             raise ValueError(
-                f"Refusing to attach {path.name!r}: larger than "
-                f"{_IMAGE_MAX_BYTES // (1024 * 1024)} MB."
+                f"Refusing to attach {path.name!r}: only {', '.join(sorted(_IMAGE_MAGIC))} files can be posted."
             )
+
+        root = image_root()
+        if root is not None and not path.is_relative_to(root):
+            raise ValueError(f"Refusing to attach {path}: LINKEDIN_MCP_IMAGE_DIR confines uploads to {root}.")
+
+        data = self._read_regular_file(path)
+        if len(data) > _IMAGE_MAX_BYTES:
+            raise ValueError(f"Refusing to attach {path.name!r}: larger than {_IMAGE_MAX_BYTES // (1024 * 1024)} MB.")
         kind = suffix.lstrip(".")
         if not data.startswith(_IMAGE_MAGIC[suffix]):
             raise ValueError(
@@ -439,23 +503,25 @@ class LinkedInClient:
         )
         # >=300, not >=400: redirects are not followed (that would carry the Bearer
         # token off-host), so a 3xx means the bytes never landed.
-        if resp.status_code >= 300:
+        if resp.status_code >= _HTTP_REDIRECT:
             raise LinkedInAPIError(resp.status_code, f"Image upload failed: {resp.text[:200]}")
 
     def _upload_image_rest(self, author: str, image_path: str) -> str:
         data = self._read_image(image_path)
-        init = self._request(
+        response = self._request(
             "POST",
             "/rest/images?action=initializeUpload",
             versioned=True,
             json={"initializeUploadRequest": {"owner": author}},
-        ).json()["value"]
-        self._upload_binary(init["uploadUrl"], data)
-        return init["image"]
+        )
+        response_body = _response_json(response)
+        init = _required_mapping(_string_mapping(response_body).get("value"), "image upload details")
+        self._upload_binary(_required_string(init.get("uploadUrl"), "image upload URL"), data)
+        return _required_string(init.get("image"), "image URN")
 
     def _upload_image_ugc(self, author: str, image_path: str) -> str:
         data = self._read_image(image_path)
-        register = self._request(
+        response = self._request(
             "POST",
             "/v2/assets?action=registerUpload",
             json={
@@ -470,23 +536,25 @@ class LinkedInClient:
                     ],
                 }
             },
-        ).json()["value"]
-        upload_url = register["uploadMechanism"][
-            "com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest"
-        ]["uploadUrl"]
-        self._upload_binary(upload_url, data)
-        return register["asset"]
+        )
+        response_body = _response_json(response)
+        register = _required_mapping(_string_mapping(response_body).get("value"), "asset registration details")
+        mechanism = _required_mapping(register.get("uploadMechanism"), "asset upload mechanism")
+        upload_request = _required_mapping(
+            mechanism.get("com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest"),
+            "asset upload request",
+        )
+        self._upload_binary(_required_string(upload_request.get("uploadUrl"), "asset upload URL"), data)
+        return _required_string(register.get("asset"), "asset URN")
 
     # ---------------------------------------------------------- delete / social
 
     def delete_post(self, target: str) -> str:
         urn = extract_post_urn(target)
-        self._rest_then_v2(
-            "DELETE", f"/rest/posts/{encode_urn(urn)}", f"/v2/ugcPosts/{encode_urn(urn)}"
-        )
+        self._rest_then_v2("DELETE", f"/rest/posts/{encode_urn(urn)}", f"/v2/ugcPosts/{encode_urn(urn)}")
         return urn
 
-    def comment(self, target: str, text: str) -> dict:
+    def comment(self, target: str, text: str) -> dict[str, str | None]:
         urn = extract_post_urn(target)
         payload = {
             "actor": self.person_urn(),
@@ -499,9 +567,15 @@ class LinkedInClient:
             f"/v2/socialActions/{encode_urn(urn)}/comments",
             json=payload,
         )
-        comment_urn = None
-        with suppress(Exception):
-            comment_urn = resp.json().get("commentUrn")
+        comment_urn: str | None = None
+        try:
+            response_body = _response_json(resp)
+        except ValueError:
+            response_body = None
+        if isinstance(response_body, Mapping):
+            candidate = response_body.get("commentUrn")
+            if isinstance(candidate, str):
+                comment_urn = candidate
         return {"comment_urn": comment_urn, "target_urn": urn, "message": text}
 
     def like(self, target: str) -> str:
@@ -515,11 +589,22 @@ class LinkedInClient:
         )
         return urn
 
-    def _rest_then_v2(self, method: str, rest_path: str, v2_path: str, **kwargs) -> httpx.Response:
+    def _rest_then_v2(
+        self,
+        method: str,
+        rest_path: str,
+        v2_path: str,
+        *,
+        json: JsonValue | None = None,
+    ) -> httpx.Response:
         try:
-            return self._request(method, rest_path, versioned=True, **kwargs)
+            if json is None:
+                return self._request(method, rest_path, versioned=True)
+            return self._request(method, rest_path, versioned=True, json=json)
         except LinkedInAPIError as exc:
             if exc.status not in _FALLBACK_STATUSES:
                 raise
             logger.info("%s %s refused (%s); retrying via v2", method, rest_path, exc.status)
-            return self._request(method, v2_path, **kwargs)
+            if json is None:
+                return self._request(method, v2_path)
+            return self._request(method, v2_path, json=json)

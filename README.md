@@ -29,55 +29,42 @@ restricted. This server deliberately splits the difference:
 
 ## Requirements
 
-- Python 3.11+ and [uv](https://docs.astral.sh/uv/)
+- Docker with Compose
 - For posting only: a free self-serve LinkedIn developer app (5-minute setup below).
   Job search and the tracker work with zero setup.
 
-## Install & connect to your agent
+## Deploy
 
-Clone/copy this directory, then register it with your MCP client. `<REPO>` below is
-the absolute path to this project.
+This fork is HTTP-only. It exposes MCP Streamable HTTP at `/mcp`; there is no
+stdio or legacy SSE mode.
 
-**Claude Code**
+Create `~/.secrets/linkedin.env`:
+
+```dotenv
+LINKEDIN_CLIENT_ID=your_client_id
+LINKEDIN_CLIENT_SECRET=your_client_secret
+```
+
+Protect it and start the service:
 
 ```bash
-claude mcp add linkedin \
-  --env LINKEDIN_CLIENT_ID=your_client_id \
-  --env LINKEDIN_CLIENT_SECRET=your_client_secret \
-  -- uv run --directory <REPO> linkedin-safe-mcp
+chmod 600 ~/.secrets/linkedin.env
+docker compose up -d --build
 ```
 
-Or in a project's `.mcp.json`:
+The Compose service joins the existing external `mcp-private-noauth` network.
+Register it in Docker MCP Gateway's catalog as:
 
-```json
-{
-  "mcpServers": {
-    "linkedin": {
-      "command": "uv",
-      "args": ["run", "--directory", "<REPO>", "linkedin-safe-mcp"],
-      "env": {
-        "LINKEDIN_CLIENT_ID": "your_client_id",
-        "LINKEDIN_CLIENT_SECRET": "your_client_secret"
-      }
-    }
-  }
-}
+```yaml
+registry:
+  linkedin:
+    remote:
+      url: http://linkedin-safe-mcp:8000/mcp
+      transport_type: http
 ```
 
-**Codex** (`~/.codex/config.toml`)
-
-```toml
-[mcp_servers.linkedin]
-command = "uv"
-args = ["run", "--directory", "<REPO>", "linkedin-safe-mcp"]
-env = { LINKEDIN_CLIENT_ID = "your_client_id", LINKEDIN_CLIENT_SECRET = "your_client_secret" }
-```
-
-**Claude Desktop** (`claude_desktop_config.json`) — same JSON shape as `.mcp.json`
-above.
-
-The `LINKEDIN_CLIENT_*` variables are only needed for posting; omit them if you
-only want job search + tracking.
+Application state is stored in the named volume `linkedin-safe-mcp-data`.
+The client ID and secret remain in the host env file and are not copied there.
 
 ## Enabling posting (one-time LinkedIn app setup)
 
@@ -88,17 +75,14 @@ only want job search + tracking.
 3. On the **Auth** tab, add the redirect URL `http://127.0.0.1:8765/callback`
    (it must be the IP literal, not `localhost` — see Security below).
 4. Copy the **Client ID** and **Client Secret** into the env vars shown above.
-5. Authenticate once — either way works:
-   - In a terminal: `uv run --directory <REPO> linkedin-safe-mcp auth`
-   - Or just ask your agent to post something; it will call the `login` tool and
-     hand you the authorization URL.
+5. Ask your agent to call `login`, open the returned URL, and complete login. The
+   callback port is published only on host loopback. When browsing from another
+   machine, first create an SSH tunnel with
+   `ssh -L 8765:127.0.0.1:8765 <server>`.
 
-Tokens are stored in `~/.linkedin-mcp/tokens.json`, created mode 0600 inside a 0700
-directory, and last ~60 days; LinkedIn doesn't issue refresh tokens to self-serve
-apps, so you re-run the login when it expires (`auth_status` tells the agent exactly
-when that is).
-LinkedIn doesn't issue refresh tokens to self-serve apps, so you re-run the login
-when it expires (`auth_status` tells the agent exactly when that is).
+Tokens are stored as `/data/tokens.json` in the named volume, created mode 0600
+inside a 0700 directory, and last roughly 60 days. LinkedIn normally does not
+issue refresh tokens to self-serve apps, so re-run login when it expires.
 
 ## Tools
 
@@ -128,7 +112,13 @@ mark the ones I applied to, and post a summary of my open-source work."*
 |---|---|---|
 | `LINKEDIN_CLIENT_ID` / `LINKEDIN_CLIENT_SECRET` | – | LinkedIn app credentials (posting only) |
 | `LINKEDIN_MCP_DIR` | `~/.linkedin-mcp` | Where tokens + tracker DB live |
+| `LINKEDIN_MCP_HOST` / `LINKEDIN_MCP_PORT` | `127.0.0.1` / `8000` | Streamable HTTP bind address |
+| `LINKEDIN_MCP_ALLOWED_HOSTS` | loopback hosts | Comma-separated HTTP Host allowlist |
+| `LINKEDIN_MCP_ALLOWED_ORIGINS` | loopback origins | Comma-separated browser Origin allowlist |
 | `LINKEDIN_REDIRECT_PORT` | `8765` | OAuth callback port (must match the app's redirect URL) |
+| `LINKEDIN_REDIRECT_BIND_HOST` | `127.0.0.1` | OAuth callback listener bind address |
+| `LINKEDIN_REDIRECT_URI` | loopback callback | Exact OAuth redirect URI override |
+| `LINKEDIN_OPEN_BROWSER` | `false` | Whether login tries to open a browser in the server process |
 | `LINKEDIN_API_VERSION` | `202606` | `LinkedIn-Version` header for `/rest/*` calls |
 | `LINKEDIN_POSTS_BACKEND` | `auto` | `rest`, `ugc`, or `auto` (try + remember what your app is allowed to use) |
 | `LINKEDIN_MCP_USER_AGENT` | a Chrome UA | UA for guest job requests |
@@ -174,7 +164,10 @@ channel straight into every tool argument. The boundaries that follow from that:
   name to `::1`, which a different local account can bind. RFC 8252 §8.3.
 - **Secrets are 0600 from creation.** Tokens, `state.json` and the tracker DB are
   created private rather than chmod-ed afterwards, closing the window where a
-  local watcher could read a fresh access token; `~/.linkedin-mcp` is 0700.
+  local watcher could read a fresh access token; the data directory is 0700.
+- **The HTTP endpoint validates Host and Origin.** The container accepts only its
+  internal service name and is not published on a host port. Authentication is
+  terminated by the shared MCP gateway at the trusted-network boundary.
 - **Upload targets are pinned.** The Bearer token is only ever PUT to an HTTPS
   `linkedin.com`/`licdn.com` host, whatever URL the API response asks for.
 
@@ -188,12 +181,19 @@ anything sensitive.
 ## Development
 
 ```bash
-uv sync            # install deps (Python ≥3.11)
-uv run pytest      # 102 tests: parsers vs live fixtures, payloads, OAuth, tracker,
-                   # security regressions, plus an end-to-end stdio smoke test
-                   # that spawns the real server
-uv run ruff check src tests && uv run ruff format --check src tests
+UV_LINK_MODE=hardlink uv sync --locked
+just check         # static QA: Ruff, types, architecture, pins, package smoke
+just unit          # fast behavior tests (integration/slow tests excluded)
+just crap-check    # radon-backed per-function CRAP threshold
+just deps-audit    # locked dependency vulnerability audit
+just docker-build  # Dockerfile/Compose validation and image build
+just runtime-smoke # starts Compose and exercises MCP Streamable HTTP
 ```
+
+`just verify` runs the complete local gate, including all checks above and the
+Docker runtime smoke. The runtime smoke sends real JSON-RPC `initialize` and
+`tools/list` requests to `/mcp`; it does not use stdio or a synthetic CLI health
+command.
 
 Layout: `src/linkedin_mcp/` — `server.py` (tool surface) · `api/` (official REST:
 posts, social actions, uploads, dual rest/ugc backend) · `auth/` (OAuth + token
@@ -205,7 +205,6 @@ store) · `jobs/` (guest client, HTML parsers, filter mappings) · `tracker/`
 - Publish to PyPI (`uvx linkedin-safe-mcp` one-liner)
 - Reaction types beyond like; multi-image posts; poll posts
 - Optional third-party job-data providers behind the same tool schema
-- `streamable-http` transport for remote/hosted use
 - (Considered, opt-in only, off by default) a cookie-based Voyager provider for
   personalized features — with loud warnings, since it violates LinkedIn's ToS
 

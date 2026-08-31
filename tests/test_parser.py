@@ -5,7 +5,6 @@ curl 'https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?key
 """
 
 from conftest import fixture_text
-
 from linkedin_mcp.jobs.parser import parse_job_detail, parse_search_results
 
 

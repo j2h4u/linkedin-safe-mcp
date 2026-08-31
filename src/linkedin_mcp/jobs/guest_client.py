@@ -30,6 +30,10 @@ SEARCH_CACHE_TTL = 600.0  # 10 min — listings churn
 JOB_CACHE_TTL = 6 * 3600.0  # 6 h — postings are static
 _MAX_START = 975  # LinkedIn stops serving guest results past ~1000
 _RETRY_DELAYS = (2.5, 6.0)
+_HTTP_OK = 200
+_HTTP_NOT_FOUND = 404
+_HTTP_TOO_MANY_REQUESTS = 429
+_HTTP_SERVER_ERROR = 500
 
 _RATE_LIMIT_MSG = (
     "LinkedIn is rate-limiting anonymous job requests from this IP (HTTP 429). "
@@ -66,10 +70,30 @@ class _TTLCache:
 
 class GuestJobsClient:
     def __init__(self, http: httpx.Client | None = None):
-        self._http = http or httpx.Client(
-            headers=_default_headers(), timeout=20.0, follow_redirects=True
-        )
+        self._http = http or httpx.Client(headers=_default_headers(), timeout=20.0, follow_redirects=True)
         self._cache = _TTLCache()
+
+    def _sleep_before_attempt(self, delay: float) -> None:
+        if delay:
+            time.sleep(delay + random.uniform(0, 0.8))
+
+    def _attempt_get(self, url: str, params: dict[str, str], attempt: int) -> tuple[str | None, int | str | None]:
+        try:
+            resp = self._http.get(url, params=params)
+        except httpx.HTTPError as exc:
+            last_status = f"network error: {exc}"
+            logger.warning("guest request failed (attempt %d): %s", attempt + 1, exc)
+            return None, last_status
+
+        if resp.status_code == _HTTP_OK:
+            return resp.text, None
+        if resp.status_code == _HTTP_NOT_FOUND:
+            raise LinkedInError("LinkedIn returned 404 — this job no longer exists or was never public.")
+        if resp.status_code != _HTTP_TOO_MANY_REQUESTS and resp.status_code < _HTTP_SERVER_ERROR:
+            raise LinkedInError(f"LinkedIn guest endpoint returned HTTP {resp.status_code}.")
+
+        logger.info("guest endpoint %s (attempt %d), backing off", resp.status_code, attempt + 1)
+        return None, resp.status_code
 
     def _get(self, url: str, params: dict[str, str], ttl: float) -> str:
         key = f"{url}?{urlencode(sorted(params.items()))}"
@@ -77,52 +101,40 @@ class GuestJobsClient:
         if cached is not None:
             return cached
 
-        last_status = None
+        last_status: int | str | None = None
         for attempt, delay in enumerate((0.0, *_RETRY_DELAYS)):
-            if delay:
-                time.sleep(delay + random.uniform(0, 0.8))
-            try:
-                resp = self._http.get(url, params=params)
-            except httpx.HTTPError as exc:
-                last_status = f"network error: {exc}"
-                logger.warning("guest request failed (attempt %d): %s", attempt + 1, exc)
-                continue
-            if resp.status_code == 200:
-                self._cache.set(key, resp.text, ttl)
-                return resp.text
-            if resp.status_code == 404:
-                raise LinkedInError(
-                    "LinkedIn returned 404 — this job no longer exists or was never public."
-                )
-            last_status = resp.status_code
-            if resp.status_code == 429 or resp.status_code >= 500:
-                logger.info(
-                    "guest endpoint %s (attempt %d), backing off", resp.status_code, attempt + 1
-                )
-                continue
-            raise LinkedInError(f"LinkedIn guest endpoint returned HTTP {resp.status_code}.")
+            self._sleep_before_attempt(delay)
+            body, last_status = self._attempt_get(url, params, attempt)
+            if body is not None:
+                self._cache.set(key, body, ttl)
+                return body
 
-        if last_status == 429:
+        if last_status == _HTTP_TOO_MANY_REQUESTS:
             raise RateLimitedError(_RATE_LIMIT_MSG)
-        raise LinkedInError(
-            f"LinkedIn guest endpoint kept failing (last result: {last_status}). Try again shortly."
-        )
+        raise LinkedInError(f"LinkedIn guest endpoint kept failing (last result: {last_status}). Try again shortly.")
+
+    def _consume_page(
+        self,
+        page: list[JobCard],
+        results: list[JobCard],
+        seen: set[str],
+        start: int,
+    ) -> tuple[int, bool]:
+        if not page:
+            return start, False
+        fresh = [card for card in page if card.job_id not in seen]
+        seen.update(card.job_id for card in page)
+        results.extend(fresh)
+        return start + len(page), bool(fresh)
 
     def search(self, params: dict[str, str], limit: int = 25) -> list[JobCard]:
         results: list[JobCard] = []
         seen: set[str] = set()
         start = 0
         while len(results) < limit and start <= _MAX_START:
-            page = parse_search_results(
-                self._get(SEARCH_URL, {**params, "start": str(start)}, SEARCH_CACHE_TTL)
-            )
-            if not page:
-                break
-            fresh = [card for card in page if card.job_id not in seen]
-            seen.update(card.job_id for card in page)
-            results.extend(fresh)
-            start += len(page)
-            if not fresh:
+            page = parse_search_results(self._get(SEARCH_URL, {**params, "start": str(start)}, SEARCH_CACHE_TTL))
+            start, has_fresh = self._consume_page(page, results, seen, start)
+            if not has_fresh:
                 break  # only repeats left — LinkedIn is padding with promoted posts
             if len(results) < limit:
                 time.sleep(1.0 + random.uniform(0, 0.6))  # politeness between pages
