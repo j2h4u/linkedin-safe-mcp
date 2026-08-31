@@ -26,8 +26,7 @@ def _check_action_refs(root: Path) -> list[str]:
             action, ref = match.groups()
             if not re.fullmatch(r"[0-9a-f]{40}", ref):
                 errors.append(
-                    f"{path.relative_to(root)} uses {action}@{ref}; "
-                    "pin actions to a full 40-character commit SHA"
+                    f"{path.relative_to(root)} uses {action}@{ref}; pin actions to a full 40-character commit SHA"
                 )
     return errors
 
