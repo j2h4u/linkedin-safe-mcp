@@ -20,27 +20,30 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7.0.1
-
-      - name: Detect code scanning availability
-        id: code-scanning
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh api "repos/${{ github.repository }}/code-scanning/alerts" >/dev/null 2>&1; then
-            echo "upload=always" >> "$GITHUB_OUTPUT"
-          else
-            echo "upload=never" >> "$GITHUB_OUTPUT"
-          fi
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4.37.8
+        uses: github/codeql-action/init@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
         with:
           languages: python
           queries: security-extended
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4.37.8
+        if: >-
+          ${{ github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: github/codeql-action/analyze@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
         with:
           category: "/language:python"
-          upload: ${{ steps.code-scanning.outputs.upload }}
+          upload: always
+
+      - name: Perform CodeQL Analysis (fork pull request)
+        if: >-
+          ${{ github.event_name == 'pull_request' &&
+              github.event.pull_request.head.repo.full_name != github.repository }}
+        uses: github/codeql-action/analyze@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        with:
+          category: "/language:python"
+          upload: never

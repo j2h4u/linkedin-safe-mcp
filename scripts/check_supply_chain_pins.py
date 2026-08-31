@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-FLOATING_ACTION_REFS = {"main", "master", "trunk", "HEAD"}
 FLOATING_IMAGE_TAGS = {"latest", "stable", "edge", "main", "master"}
 # Match both ordinary steps (`- uses:`) and job-level reusable workflows (`uses:`).
 WORKFLOW_USES_PATTERN = re.compile(r"^\s*(?:-\s*)?uses:\s*([^@\s]+)@([^\s#]+)", re.MULTILINE)
@@ -25,8 +24,11 @@ def _check_action_refs(root: Path) -> list[str]:
         text = path.read_text(encoding="utf-8")
         for match in WORKFLOW_USES_PATTERN.finditer(text):
             action, ref = match.groups()
-            if ref in FLOATING_ACTION_REFS or re.fullmatch(r"v?\d+", ref) or re.fullmatch(r"v?\d+\.\d+", ref):
-                errors.append(f"{path.relative_to(root)} uses {action}@{ref}; pin actions to a full version or SHA")
+            if not re.fullmatch(r"[0-9a-f]{40}", ref):
+                errors.append(
+                    f"{path.relative_to(root)} uses {action}@{ref}; "
+                    "pin actions to a full 40-character commit SHA"
+                )
     return errors
 
 
