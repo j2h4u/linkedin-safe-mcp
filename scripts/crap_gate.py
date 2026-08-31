@@ -31,7 +31,6 @@ class _CoverageReport(TypedDict):
 class _RadonBlock(Protocol):
     name: str
     lineno: int
-    endline: int
     complexity: int
 
 

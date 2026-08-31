@@ -1,13 +1,7 @@
 # Best Practices
 
-This repository is both a project template and a store of preferred QA,
-runtime, and repository-operating practices. Keep durable rationale here. Keep
-`AGENTS.md` short and operational.
-
-This document is intended to be copied into repositories created from the
-template. Maintainer-only plans for this template repository belong in
-`docs/meta/`; start with `docs/meta/ROADMAP.md` for template-repository
-planning.
+This repository stores preferred QA, runtime, and repository-operating
+practices. Keep durable rationale here. Keep `AGENTS.md` short and operational.
 
 ## Documentation Model
 
@@ -16,9 +10,6 @@ planning.
   and links to deeper runbooks.
 - `docs/BEST_PRACTICES.md` is the canonical place for reusable engineering
   rationale and audit checklists.
-- `docs/meta/` contains maintainer documentation for this template repository
-  itself. It is copied by GitHub templates, but new projects should remove or
-  rewrite it.
 
 When a practice becomes stable enough to reuse across projects, document it here
 by domain. If it needs exact commands for agents, include the commands here and
@@ -65,8 +56,8 @@ brownfield project under control, CRAP ratchets are appropriate: freeze the
 current debt, require new changes to improve or hold the line, then replace the
 ratchet with absolute thresholds as the codebase gets clean.
 
-Keep suppression budgets explicit and small. The default template budget is
-zero for `noqa`, `type: ignore`, `pyright: ignore`, `pylint: disable`, and
+Keep suppression budgets explicit and small. The default project budget is zero
+for `noqa`, `type: ignore`, `pyright: ignore`, `pylint: disable`, and
 file-level Ruff suppression because suppressions are policy exceptions, not
 normal development tools. If a mature project needs exceptions, raise the
 budget deliberately and explain the reason in the same change.
@@ -85,12 +76,14 @@ cycles, can treat `TYPE_CHECKING` imports as real coupling, and with
 `exact = true` fails when a declared dependency is no longer used. That makes
 the architecture file both a gate and a living map, not a loose set of examples.
 
-A fresh project should keep `tach.toml` small but real: define the current
-layers, set `root_module = "forbid"`, keep `layers_explicit_depends_on = true`,
-and declare actual module edges as soon as modules appear. In a mature project,
-add `visibility`, `cannot_depend_on`, and `[[interfaces]]` rules for public
-facades and reviewed ownership boundaries. Do not use deprecated edges as a
-default; reserve them for named brownfield cleanup work with a removal plan.
+A project should keep `tach.toml` small but real: define the current layers,
+set `root_module = "ignore"` when a CLI imports package metadata through the
+package root and Tach's synthetic root cannot model that edge, keep
+`layers_explicit_depends_on = true`, and declare actual module edges as soon as
+modules appear. In a mature project, add `visibility`, `cannot_depend_on`, and
+`[[interfaces]]` rules for public facades and reviewed ownership boundaries. Do
+not use deprecated edges as a default; reserve them for named brownfield
+cleanup work with a removal plan.
 
 Use pytest markers from the start:
 
@@ -170,8 +163,7 @@ or digests, and local Compose images should use clear local tags.
 CI should classify documentation-only changes explicitly instead of hiding them
 behind workflow-level `paths-ignore`. A small change classifier keeps the final
 aggregate job visible on every PR/push while skipping expensive code gates only
-when the changed files are genuinely documentation or template-maintainer
-metadata.
+when the changed files are genuinely documentation or repository metadata.
 
 ## Docker Build Context
 
@@ -222,55 +214,3 @@ Python packages should also have a packaging smoke gate. Build the wheel,
 install it into an isolated virtual environment, and run the installed
 entrypoint. This catches missing package data, broken script entrypoints, and
 wheel/install issues that source-tree tests can miss.
-
-## GitHub Template Security Setup
-
-GitHub template creation copies repository files, including workflows and
-`.github/dependabot.yml`, but repository security settings are not reliable
-template outputs. After creating a new repository from this template, use `gh` to
-enable and verify the security features that live in repository settings.
-
-Run this from the new repository checkout:
-
-```bash
-REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
-
-gh api -X PUT "repos/$REPO/vulnerability-alerts" --silent
-gh api -X PUT "repos/$REPO/automated-security-fixes" --silent
-
-gh api -X PATCH "repos/$REPO" --input - <<'JSON'
-{
-  "security_and_analysis": {
-    "secret_scanning": {"status": "enabled"},
-    "secret_scanning_push_protection": {"status": "enabled"}
-  }
-}
-JSON
-
-gh api -X PATCH "repos/$REPO/code-scanning/default-setup" \
-  -f state=not-configured \
-  --silent || true
-
-gh workflow run ci.yml --ref main
-gh workflow run codeql.yml --ref main
-gh workflow run dependency-submission.yml --ref main
-
-gh api "repos/$REPO/dependabot/alerts?state=open&per_page=100" --jq length
-gh api "repos/$REPO/code-scanning/alerts?state=open&per_page=100" --jq length
-gh api "repos/$REPO/secret-scanning/alerts?state=open&per_page=100" --jq length
-```
-
-If GitHub exposes a separate malware-alerts toggle for the new repository, check
-it manually in **Settings -> Code security and analysis**. Do not assume it was
-copied from the template.
-
-This template uses the copied CodeQL workflow. Do not also enable CodeQL default
-setup, because GitHub rejects SARIF from advanced and default setup when both
-are active.
-
-## Future Agent Skill
-
-If this repository grows into an agent skill, the skill should treat
-`docs/BEST_PRACTICES.md` as its canonical source of project QA policy. The
-maintainer roadmap for that work lives in `docs/meta/ROADMAP.md`. The skill can
-route by domain, but it should not duplicate the same policy in multiple files.

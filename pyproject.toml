@@ -3,7 +3,7 @@ name = "linkedin-safe-mcp"
 version = "0.1.0"
 description = "MCP server for LinkedIn: official-API posting, account-safe job search, and a local application tracker for AI agents"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 license = "MIT"
 authors = [{ name = "Ankush" }]
 keywords = ["mcp", "linkedin", "model-context-protocol", "job-search", "agents"]
