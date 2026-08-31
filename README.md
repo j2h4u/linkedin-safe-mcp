@@ -8,10 +8,6 @@ LinkedIn account at risk**:
   (OAuth, ToS-compliant), plus comments and likes.
 - **Search jobs** — keyword/location/remote/experience/date filters via LinkedIn's
   **public guest endpoints**. No login, no cookies: your account is never involved.
-- **Run a job hunt** — a local SQLite application tracker (interested → applied →
-  interviewing → offer) with notes and per-job posting snapshots, so an agent can
-  manage your pipeline and write tailored cover letters even after a posting is
-  taken down.
 
 ## Why this design?
 
@@ -24,14 +20,13 @@ restricted. This server deliberately splits the difference:
 |---|---|---|
 | Posting, comments, likes | Official REST API, your own OAuth app, `w_member_social` | None — sanctioned |
 | Job search & details | Guest endpoints (the logged-out jobs pages), IP-rate-limited | None — no credentials involved |
-| Pipeline tracking | Local SQLite on your machine | None — never touches LinkedIn |
 | Easy Apply, DMs, feed reading | **Intentionally not included** — impossible without ToS-violating access | — |
 
 ## Requirements
 
 - Docker with Compose
 - For posting only: a free self-serve LinkedIn developer app (5-minute setup below).
-  Job search and the tracker work with zero setup.
+  Job search works with zero setup.
 
 ## Deploy
 
@@ -97,21 +92,17 @@ issue refresh tokens to self-serve apps, so re-run login when it expires.
 | `like_post` | ✓ | Like a post (URN or post URL) |
 | `search_jobs` | – | Filters: location, remote/hybrid/onsite, time posted, experience levels, job types, Easy-Apply-only, sort; up to 50 results |
 | `get_job` | – | Full posting: description, seniority, type, salary if listed, applicant count, external apply URL |
-| `save_job` | – | Snapshot a job into the local tracker |
-| `get_saved_job` / `list_saved_jobs` | – | One job with history / pipeline overview with status counts |
-| `update_job_status` | – | interested → applied → interviewing → offer / rejected / withdrawn / archived, with notes |
-| `add_job_note` / `remove_saved_job` | – | Append a note / drop a job |
 
 Things agents can do with this: *"find remote staff-engineer roles posted this week,
-save the promising ones, draft tailored cover letters from the saved descriptions,
-mark the ones I applied to, and post a summary of my open-source work."*
+summarize the promising ones, draft tailored cover letters, and post a summary of my
+open-source work."*
 
 ## Configuration
 
 | Env var | Default | Purpose |
 |---|---|---|
 | `LINKEDIN_CLIENT_ID` / `LINKEDIN_CLIENT_SECRET` | – | LinkedIn app credentials (posting only) |
-| `LINKEDIN_MCP_DIR` | `~/.linkedin-mcp` | Where tokens + tracker DB live |
+| `LINKEDIN_MCP_DIR` | `~/.linkedin-mcp` | Where OAuth tokens and state live |
 | `LINKEDIN_MCP_HOST` / `LINKEDIN_MCP_PORT` | `127.0.0.1` / `8000` | Streamable HTTP bind address |
 | `LINKEDIN_MCP_ALLOWED_HOSTS` | loopback hosts | Comma-separated HTTP Host allowlist |
 | `LINKEDIN_MCP_ALLOWED_ORIGINS` | loopback origins | Comma-separated browser Origin allowlist |
@@ -162,18 +153,18 @@ channel straight into every tool argument. The boundaries that follow from that:
   text is HTML-escaped at the sink.
 - **The redirect URL is `127.0.0.1`, never `localhost`.** Browsers may resolve the
   name to `::1`, which a different local account can bind. RFC 8252 §8.3.
-- **Secrets are 0600 from creation.** Tokens, `state.json` and the tracker DB are
-  created private rather than chmod-ed afterwards, closing the window where a
-  local watcher could read a fresh access token; the data directory is 0700.
+- **Secrets are 0600 from creation.** Tokens and `state.json` are created private
+  rather than chmod-ed afterwards, closing the window where a local watcher could
+  read a fresh access token; the data directory is 0700.
 - **The HTTP endpoint validates Host and Origin.** The container accepts only its
   internal service name and is not published on a host port. Authentication is
   terminated by the shared MCP gateway at the trusted-network boundary.
 - **Upload targets are pinned.** The Bearer token is only ever PUT to an HTTPS
   `linkedin.com`/`licdn.com` host, whatever URL the API response asks for.
 
-These are covered by regression tests (`tests/test_client_security.py`, the
-security sections of `tests/test_oauth.py` and `tests/test_tracker.py`) — each one
-is a working exfiltration or hijack attempt that must fail closed.
+These are covered by regression tests (`tests/test_client_security.py` and the
+security sections of `tests/test_oauth.py`) — each one is a working exfiltration
+or hijack attempt that must fail closed.
 
 Found something? Open an issue, or email the address on the GitHub profile for
 anything sensitive.
@@ -197,8 +188,8 @@ command.
 
 Layout: `src/linkedin_mcp/` — `server.py` (tool surface) · `api/` (official REST:
 posts, social actions, uploads, dual rest/ugc backend) · `auth/` (OAuth + token
-store) · `jobs/` (guest client, HTML parsers, filter mappings) · `tracker/`
-(SQLite store) · `cli.py` (`serve` | `auth` | `status` | `logout`).
+store) · `jobs/` (guest client, HTML parsers, filter mappings) · `cli.py` (`serve` |
+`auth` | `status` | `logout`).
 
 ## Roadmap
 

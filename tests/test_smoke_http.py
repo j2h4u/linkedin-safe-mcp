@@ -27,12 +27,6 @@ EXPECTED_TOOLS = {
     "like_post",
     "search_jobs",
     "get_job",
-    "save_job",
-    "get_saved_job",
-    "list_saved_jobs",
-    "update_job_status",
-    "add_job_note",
-    "remove_saved_job",
 }
 STARTUP_TIMEOUT = 10.0
 REQUEST_TIMEOUT = 10.0
@@ -132,7 +126,7 @@ async def test_streamable_http_initialize_and_list_tools(
                 tools = await session.list_tools()
 
     names = {tool.name for tool in tools.tools}
-    assert names >= EXPECTED_TOOLS, f"missing: {EXPECTED_TOOLS - names}"
+    assert names == EXPECTED_TOOLS, f"unexpected tools: {names ^ EXPECTED_TOOLS}"
     assert all(tool.description for tool in tools.tools), "every tool must have a description"
 
 

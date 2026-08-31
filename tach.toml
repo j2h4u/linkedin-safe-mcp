@@ -34,14 +34,12 @@ path = "linkedin_mcp.server"
 layer = "delivery"
 depends_on = [
     "linkedin_mcp.api.client",
-    "linkedin_mcp.api.urns",
     "linkedin_mcp.auth.oauth",
     "linkedin_mcp.config",
     "linkedin_mcp.errors",
     "linkedin_mcp.jobs.filters",
     "linkedin_mcp.jobs.guest_client",
     "linkedin_mcp.models",
-    "linkedin_mcp.tracker.store",
 ]
 
 [[modules]]
@@ -104,8 +102,3 @@ depends_on = ["linkedin_mcp.api.urns", "linkedin_mcp.models"]
 path = "linkedin_mcp.models"
 layer = "domain"
 depends_on = []
-
-[[modules]]
-path = "linkedin_mcp.tracker.store"
-layer = "domain"
-depends_on = ["linkedin_mcp.config", "linkedin_mcp.errors", "linkedin_mcp.models"]

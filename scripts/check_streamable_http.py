@@ -79,10 +79,21 @@ def main() -> int:
         raise RuntimeError(f"MCP tools/list returned no tools: {tools_response}")
 
     names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
-    expected = {"auth_status", "search_jobs", "list_saved_jobs"}
-    missing = expected - names
-    if missing:
-        raise RuntimeError(f"MCP tools/list is missing expected tools: {sorted(missing)}")
+    expected = {
+        "auth_status",
+        "login",
+        "logout",
+        "get_my_profile",
+        "create_post",
+        "delete_post",
+        "comment_on_post",
+        "like_post",
+        "search_jobs",
+        "get_job",
+    }
+    if names != expected:
+        unexpected = sorted(str(name) for name in names ^ expected)
+        raise RuntimeError(f"MCP tools/list returned unexpected tools: {unexpected}")
     print(f"streamable HTTP smoke passed: initialize and tools/list ({len(tools)} tools)")
     return 0
 
